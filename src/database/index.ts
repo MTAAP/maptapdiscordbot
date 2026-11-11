@@ -8,6 +8,7 @@ fs.mkdirSync(path.dirname(path.resolve(config.database.path)), { recursive: true
 export const db: DatabaseType = new Database(config.database.path);
 
 db.pragma('journal_mode = WAL');
+db.pragma('synchronous = NORMAL');
 
 export function initializeDatabase(): void {
     db.exec(`
@@ -39,5 +40,14 @@ export function initializeDatabase(): void {
             game_date TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
     `);
+}
+
+export function checkpointDatabase(): void {
+    db.pragma('wal_checkpoint(TRUNCATE)');
 }

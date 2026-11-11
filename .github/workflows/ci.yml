@@ -24,9 +24,10 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-      - name: Install, build, and smoke-check SQLite binding
+      - name: Verify 48h release-age policy, build, and run tests
         run: |
           set -euo pipefail
-          npm ci
-          npm run build
+          node scripts/check-lockfile-age.mjs --all
+          npm ci --ignore-scripts
+          npm test
           node -e "const Database = require('better-sqlite3'); const db = new Database(':memory:'); db.exec('SELECT 1'); db.close();"

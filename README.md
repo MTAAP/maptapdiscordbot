@@ -1,37 +1,39 @@
-# Mappy - MapTap Discord Score Tracker
+# Mappy: MapTap Discord Score Tracker
 
-A Discord bot that tracks MapTap geography game scores, provides daily summaries, and maintains leaderboards.
+A Discord bot that tracks MapTap geography game scores, posts daily and weekly summaries, and maintains server leaderboards.
 
 ## Features
 
-- **Automatic Score Detection**: Monitors a channel for MapTap score messages (starting with `www.maptap.gg`)
-- **Daily Statistics**: Average scores, top 3 players
-- **All-Time Leaderboards**: Best averages, highest scores, biggest deltas
+- **Automatic Score Detection**: Monitors a channel for MapTap score messages starting with `www.maptap.gg` (`0` to `1,000` points across up to 5 rounds)
+- **Daily and Weekly Summaries**: Automated daily recap at `SUMMARY_HOUR:00` and Monday weekly recap at `SUMMARY_HOUR:05` in `TIMEZONE`
+- **All-Time Leaderboards**: Best averages, highest scores, worst scores, per-round breakdowns, and biggest daily deltas
 - **Record Tracking**: Announces when all-time high scores are broken
-- **Daily Summary**: Automated midnight recap of the day's games
 
 ## Commands
 
-- `/maptap daily` - Show today's statistics
-- `/maptap leaderboard` - Show all-time leaderboard
-- `/maptap records` - Show top 10 all-time scores
-- `/maptap stats [@user]` - Show stats for a user
-- `/maptap delta` - Show biggest deltas (score vs daily average)
+- `/maptap daily`: Show today's statistics
+- `/maptap weekly`: Show the current Monday-to-Sunday standings
+- `/maptap leaderboard`: Show the all-time leaderboard
+- `/maptap records`: Show top 10 all-time scores
+- `/maptap worst`: Show the 10 lowest scores recorded
+- `/maptap allplayers`: Show all players ranked by average score
+- `/maptap fullstats`: Show mean, median, standard deviation, and per-round stats
+- `/maptap stats [@user]`: Show stats for a user (defaults to you)
+- `/maptap delta`: Show biggest deltas (score vs daily average)
+- `/maptap import`: Backfill historical scores from channel history since 2024-01-01 (Administrator only)
 
 ## Setup
 
 ### 1. Create Discord Bot
 
-1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
+1. Open the [Discord Developer Portal](https://discord.com/developers/applications)
 2. Click "New Application" and name it **Mappy**
-3. Go to "Bot" section and click "Add Bot"
-4. Copy the bot token
-5. Enable these Privileged Gateway Intents:
-   - Message Content Intent
-6. Go to OAuth2 → URL Generator:
+3. Open the "Bot" section, add a bot user, and copy the bot token (use a separate application and guild for local development so local sessions do not share the production token)
+4. Enable the **Message Content Intent** under Privileged Gateway Intents
+5. Open OAuth2 -> URL Generator:
    - Scopes: `bot`, `applications.commands`
    - Bot Permissions: `Send Messages`, `Read Message History`, `Add Reactions`, `Use Slash Commands`
-7. Use the generated URL to invite the bot to your server
+6. Invite the bot to your Discord server with the generated URL
 
 ### 2. Configure Environment
 
@@ -40,31 +42,41 @@ cp .env.example .env
 ```
 
 Edit `.env` with your values:
+
 ```env
 DISCORD_TOKEN=your_bot_token
 DISCORD_CLIENT_ID=your_bot_client_id
 GUILD_ID=your_server_id
 CHANNEL_ID=channel_to_monitor
+# Optional: separate channel for daily and weekly summaries (defaults to CHANNEL_ID)
+# SUMMARY_CHANNEL_ID=channel_for_summaries
 TIMEZONE=Europe/Amsterdam
 SUMMARY_HOUR=0
+DATABASE_PATH=./maptap.db
 ```
 
-To find IDs:
-- Enable Developer Mode in Discord (Settings → Advanced → Developer Mode)
-- Right-click server → Copy Server ID
-- Right-click channel → Copy Channel ID
+To find Discord IDs:
+- Enable Developer Mode in Discord (Settings -> Advanced -> Developer Mode)
+- Right-click the server -> Copy Server ID
+- Right-click the channel -> Copy Channel ID
 
-### 3. Install & Run
+### 3. Install, Test, and Run
+
+`.npmrc` enforces `min-release-age=2` (48-hour minimum package age) and `ignore-scripts=true`.
 
 ```bash
-# Install dependencies
-npm install
+# Install dependencies (lifecycle scripts disabled)
+npm ci --ignore-scripts
 
-# Deploy slash commands (run once, or when commands change)
-npm run deploy-commands
+# Verify lockfile release age, typecheck, and run tests
+npm run check:lockfile -- --all
+npm test
 
-# Development (with hot reload)
+# Development (with hot reload; guild slash commands sync automatically on startup)
 npm run dev
+
+# Optional: register slash commands without starting the bot
+npm run deploy-commands
 
 # Production
 npm run build
@@ -73,31 +85,36 @@ npm start
 
 ## Deployment
 
-Pushes to `master` run `.github/workflows/build-and-deploy.yml` on GitHub Actions (`ubuntu-latest`). After typechecking and building in `ci.yml`, the workflow publishes `ghcr.io/mtaap/maptapdiscordbot:master` and triggers a stop-then-start deployment on Coolify (`free-fsn1-01`).
+Pushes to `master` run `.github/workflows/build-and-deploy.yml` on GitHub Actions (`ubuntu-latest`). After `ci.yml` verifies lockfile package ages, typechecks, and runs tests, the workflow publishes the private image `ghcr.io/mtaap/maptapdiscordbot:master` and triggers Coolify's per-app HMAC-signed GitHub webhook on `free-fsn1-01` (`custom_internal_name: maptapdiscordbot`, running as non-root `node` on an isolated bridge network).
 
-Runtime configuration comes from Infisical EU (`maptapdiscordbot`, environment `prod`, folder `/app`), and SQLite persists on the `/data` volume (`DATABASE_PATH=/data/maptap.db`). On startup the bot registers guild slash commands and backfills channel score history if the database is empty.
+GitHub Actions configuration:
+- Variables: `DEPLOY_ENABLED` (`true`), `IMAGE_NAME` (`ghcr.io/mtaap/maptapdiscordbot`), `RUNNER` (`ubuntu-latest`)
+- Secret: `COOLIFY_WEBHOOK_SECRET` (backed up in Infisical EU project `maptapdiscordbot`, environment `prod`, folder `/ci`)
+
+Runtime configuration is synced by Coolify from Infisical EU (`maptapdiscordbot`, environment `prod`, folder `/app`), and SQLite persists on `/data` (`DATABASE_PATH=/data/maptap.db`). On first boot the bot registers guild slash commands, backfills channel history since 2024-01-01, seeds the baseline high-score record, and marks `meta.initial_backfill_complete`. Daily hot SQLite backups run on `free-fsn1-01` via `maptap-sqlite-backup.timer` (`/var/backups/maptap`, 14-day retention) alongside Hetzner's nightly VM snapshot.
 
 ## Score Format
 
 The bot detects messages starting with `www.maptap.gg`:
 
-```
+```text
 www.maptap.gg November 11
 96🏅 93🏆 94🏅 96🔥 54😔
 Final score: 827
 ```
 
 When a valid score is detected, the bot:
-1. Reacts with ✅ to confirm
-2. Stores the score in the database
-3. Announces if it's a new all-time record
+1. Inserts the score into SQLite (`UNIQUE(user_id, game_date)`)
+2. Announces if it sets a new all-time high score
+3. Reacts with ✅ to confirm
 
 ## Database
 
-SQLite database stored in `maptap.db`. Contains:
-- `scores` - All individual game scores
-- `records` - Record-breaking achievements
+SQLite database stored at `DATABASE_PATH` (`./maptap.db` locally, `/data/maptap.db` in Docker):
+- `scores`: Individual daily game scores
+- `records`: All-time record-breaking achievements
+- `meta`: Operational state markers (`initial_backfill_complete`)
 
 ## License
 
-MIT
+ISC

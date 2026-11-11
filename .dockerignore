@@ -1,8 +1,11 @@
 node_modules
 dist
+test
+scripts
 .git
 .github
 .env
+*.md
 *.db
 *.db-*
 *.sqlite

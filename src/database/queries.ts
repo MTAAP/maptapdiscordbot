@@ -1,4 +1,7 @@
 import { db } from './index';
+import { getTodayDate } from '../utils/dates';
+
+export { getTodayDate };
 
 export interface Score {
     id: number;
@@ -38,6 +41,15 @@ export interface RecordInfo {
     created_at: string;
 }
 
+export interface ScoreBatchInput {
+    userId: string;
+    username: string;
+    score: number;
+    roundScores: number[];
+    gameDate: string;
+    messageId: string;
+}
+
 export function insertScore(
     userId: string,
     username: string,
@@ -60,6 +72,40 @@ export function insertScore(
         new Date().toISOString()
     );
     return result.changes > 0;
+}
+
+export function insertScoresBatch(rows: ScoreBatchInput[]): { imported: number; skipped: number } {
+    if (rows.length === 0) {
+        return { imported: 0, skipped: 0 };
+    }
+    const stmt = db.prepare(`
+        INSERT OR IGNORE INTO scores (user_id, username, score, round_scores, game_date, message_id, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const runBatch = db.transaction((items: ScoreBatchInput[]) => {
+        let imported = 0;
+        let skipped = 0;
+        const nowIso = new Date().toISOString();
+        for (const item of items) {
+            const res = stmt.run(
+                item.userId,
+                item.username,
+                item.score,
+                JSON.stringify(item.roundScores),
+                item.gameDate,
+                item.messageId,
+                nowIso
+            );
+            if (res.changes > 0) {
+                imported++;
+            } else {
+                skipped++;
+            }
+        }
+        return { imported, skipped };
+    });
+
+    return runBatch(rows);
 }
 
 export function getScoresForDate(date: string): Score[] {
@@ -185,8 +231,54 @@ export function getRecordsForDate(date: string): RecordInfo[] {
     return stmt.all(date) as RecordInfo[];
 }
 
-export function getTodayDate(timezone: string): string {
-    return new Date().toLocaleDateString('en-CA', { timeZone: timezone });
+export function ensureBaselineTopRecord(): boolean {
+    const seedTx = db.transaction(() => {
+        const topScore = db
+            .prepare(
+                'SELECT user_id, username, score, game_date FROM scores ORDER BY score DESC, game_date ASC, id ASC LIMIT 1'
+            )
+            .get() as { user_id: string; username: string; score: number; game_date: string } | undefined;
+
+        if (!topScore) {
+            return false;
+        }
+
+        const existingTopRecord = db
+            .prepare(
+                "SELECT value, user_id, username FROM records WHERE record_type = 'top_score' ORDER BY value DESC, id DESC LIMIT 1"
+            )
+            .get() as { value: number; user_id: string; username: string } | undefined;
+
+        if (existingTopRecord && existingTopRecord.value >= topScore.score) {
+            return false;
+        }
+
+        insertRecord(
+            'top_score',
+            topScore.user_id,
+            topScore.username,
+            topScore.score,
+            existingTopRecord?.value ?? null,
+            existingTopRecord?.user_id ?? null,
+            existingTopRecord?.username ?? null,
+            topScore.game_date
+        );
+        return true;
+    });
+
+    return seedTx();
+}
+
+export function getMetaValue(key: string): string | null {
+    const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+}
+
+export function setMetaValue(key: string, value: string): void {
+    db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(
+        key,
+        value
+    );
 }
 
 // Enhanced statistics

@@ -1,5 +1,6 @@
 import fs from 'fs';
-import { db, initializeDatabase } from './database';
+import { Events } from 'discord.js';
+import { checkpointDatabase, db, initializeDatabase } from './database';
 import { startBot } from './bot/client';
 import { syncGuildCommands } from './deploy-commands';
 import { backfillIfDatabaseEmpty } from './services/channelImport';
@@ -19,7 +20,7 @@ async function main(): Promise<void> {
 
     const client = await startBot();
     if (!client.isReady()) {
-        await new Promise<void>(resolve => client.once('ready', () => resolve()));
+        await new Promise<void>(resolve => client.once(Events.ClientReady, () => resolve()));
     }
 
     writeHeartbeat();
@@ -30,15 +31,23 @@ async function main(): Promise<void> {
     }, 30_000);
     heartbeatTimer.unref();
 
+    await backfillIfDatabaseEmpty(client);
+
     startDailyScheduler(client);
     startWeeklyScheduler(client);
 
-    void backfillIfDatabaseEmpty(client);
-
+    let shuttingDown = false;
     const shutdown = () => {
+        if (shuttingDown) return;
+        shuttingDown = true;
         console.log('Shutting down Mappy...');
         clearInterval(heartbeatTimer);
         client.destroy();
+        try {
+            checkpointDatabase();
+        } catch (error) {
+            console.warn('WAL checkpoint on shutdown failed:', error);
+        }
         db.close();
         process.exit(0);
     };

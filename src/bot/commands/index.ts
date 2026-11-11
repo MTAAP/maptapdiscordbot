@@ -49,9 +49,13 @@ export async function handleInteraction(interaction: Interaction): Promise<void>
                 ephemeral: true,
             };
             if (interaction.replied || interaction.deferred) {
-                await interaction.followUp(reply);
+                await interaction.followUp(reply).catch(replyErr => {
+                    console.warn('Failed to send error followUp:', replyErr);
+                });
             } else {
-                await interaction.reply(reply);
+                await interaction.reply(reply).catch(replyErr => {
+                    console.warn('Failed to send error reply:', replyErr);
+                });
             }
         }
     }

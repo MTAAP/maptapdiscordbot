@@ -1,6 +1,8 @@
 import { EmbedBuilder } from 'discord.js';
 import type { DailyStats, RecordInfo, WeeklyStats } from '../database/queries';
 
+export const DISCORD_EMBED_FIELD_LIMIT = 1024;
+
 export function formatNumber(num: number): string {
     return num.toLocaleString('en-US', { maximumFractionDigits: 0 });
 }
@@ -9,13 +11,96 @@ export function formatAverage(num: number): string {
     return num.toLocaleString('en-US', { maximumFractionDigits: 1 });
 }
 
+export function chunkEntriesForFields(
+    entries: string[],
+    options: {
+        separator?: string;
+        maxFieldLength?: number;
+        maxFields?: number;
+        maxTotalLength?: number;
+        overflowLabel?: string;
+    } = {}
+): string[] {
+    const separator = options.separator ?? '\n';
+    const maxFieldLength = options.maxFieldLength ?? DISCORD_EMBED_FIELD_LIMIT;
+    const maxFields = options.maxFields ?? 20;
+    const maxTotalLength = options.maxTotalLength ?? 4800;
+    const overflowLabel = options.overflowLabel ?? 'entry';
+
+    const chunks: string[] = [];
+    let current = '';
+    let totalUsed = 0;
+    let includedCount = 0;
+
+    for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i].slice(0, maxFieldLength - 40);
+        const remainingEntries = entries.length - i;
+        // Reserve 48 chars in case we must append "...and N more ..."
+        const reserve = remainingEntries > 1 ? 48 : 0;
+        const candidate = current ? `${current}${separator}${entry}` : entry;
+
+        if (totalUsed - current.length + candidate.length + reserve > maxTotalLength) {
+            break;
+        }
+
+        if (candidate.length <= maxFieldLength - reserve) {
+            totalUsed += candidate.length - current.length;
+            current = candidate;
+            includedCount++;
+            continue;
+        }
+
+        if (current) {
+            chunks.push(current);
+            current = '';
+        }
+
+        if (chunks.length >= maxFields - 1) {
+            // Last allowed field: keep fitting entries until budget is reached
+            if (totalUsed + entry.length + reserve > maxTotalLength || entry.length > maxFieldLength - reserve) {
+                break;
+            }
+        }
+
+        if (chunks.length >= maxFields) {
+            break;
+        }
+
+        current = entry;
+        totalUsed += entry.length;
+        includedCount++;
+    }
+
+    if (current) {
+        chunks.push(current);
+    }
+
+    const omitted = entries.length - includedCount;
+    if (omitted > 0) {
+        const suffix = `...and ${omitted} more ${overflowLabel}${omitted === 1 ? '' : 's'}`;
+        if (chunks.length === 0) {
+            chunks.push(suffix);
+        } else {
+            const lastIdx = chunks.length - 1;
+            const combined = `${chunks[lastIdx]}${separator}${suffix}`;
+            if (combined.length <= maxFieldLength) {
+                chunks[lastIdx] = combined;
+            } else if (chunks.length < maxFields) {
+                chunks.push(suffix);
+            }
+        }
+    }
+
+    return chunks;
+}
+
 export function createDailySummaryEmbed(
     date: string,
     stats: DailyStats,
     records: RecordInfo[]
 ): EmbedBuilder {
     const embed = new EmbedBuilder()
-        .setTitle(`🗺️ MapTap Daily Summary`)
+        .setTitle('🗺️ MapTap Daily Summary')
         .setDescription(`**${formatDate(date)}**`)
         .setColor(0x5865F2)
         .setTimestamp();
@@ -30,7 +115,7 @@ export function createDailySummaryEmbed(
 
     // Today's stats
     embed.addFields({
-        name: '📊 Today\'s Stats',
+        name: "📊 Today's Stats",
         value: `• Players: **${stats.totalGames}**\n• Daily Average: **${formatAverage(stats.average)}** pts`,
     });
 
@@ -59,9 +144,9 @@ export function createDailySummaryEmbed(
         });
     }
 
-    // Records broken
+    // Records broken (chunked across <=1024-char fields)
     if (records.length > 0) {
-        const recordsText = records.map(r => {
+        const recordEntries = records.map(r => {
             if (r.record_type === 'top_score') {
                 const prevText = r.previous_value
                     ? `\n   Previous: ${formatNumber(r.previous_value)} by ${r.previous_holder_name}`
@@ -69,12 +154,22 @@ export function createDailySummaryEmbed(
                 return `⭐ **New All-Time High:** ${formatNumber(r.value)} by ${r.username}!${prevText}`;
             }
             return `📈 New ${r.record_type}: ${formatNumber(r.value)} by ${r.username}`;
-        }).join('\n\n');
-
-        embed.addFields({
-            name: '🆕 Records Broken!',
-            value: recordsText,
         });
+
+        const recordChunks = chunkEntriesForFields(recordEntries, {
+            separator: '\n\n',
+            maxFieldLength: DISCORD_EMBED_FIELD_LIMIT,
+            maxFields: 15,
+            maxTotalLength: 4200,
+            overflowLabel: 'record',
+        });
+
+        for (let i = 0; i < recordChunks.length; i++) {
+            embed.addFields({
+                name: i === 0 ? '🆕 Records Broken!' : '\u200b',
+                value: recordChunks[i],
+            });
+        }
     }
 
     embed.setFooter({ text: 'See full stats with /maptap leaderboard' });
@@ -151,8 +246,8 @@ export function createUserStatsEmbed(
 
 function formatDate(dateStr: string): string {
     // Convert "2026-11-11" to "Nov 11"
-    const date = new Date(dateStr + 'T12:00:00');
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const date = new Date(dateStr + 'T12:00:00Z');
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
 export function createWeeklySummaryEmbed(stats: WeeklyStats): EmbedBuilder {
@@ -176,19 +271,28 @@ export function createWeeklySummaryEmbed(stats: WeeklyStats): EmbedBuilder {
         value: `• Total Games: **${stats.totalGames}**\n• Players: **${stats.totalPlayers}**\n• Weekly Average: **${formatAverage(stats.overallAverage)}** pts`,
     });
 
-    // Player rankings (all participants)
+    // Player rankings (chunked across <=1024-char fields within Discord's 6,000-char embed limit)
     const medals = ['🥇', '🥈', '🥉'];
     if (stats.playerStats.length > 0) {
-        const rankingsText = stats.playerStats
-            .map((p, i) => {
-                const prefix = i < 3 ? medals[i] : `**${i + 1}.**`;
-                return `${prefix} ${p.username} - **${formatAverage(p.average)}** avg (${p.games} games)`;
-            })
-            .join('\n');
-        embed.addFields({
-            name: '🏆 Player Rankings',
-            value: rankingsText,
+        const rankingEntries = stats.playerStats.map((p, i) => {
+            const prefix = i < 3 ? medals[i] : `**${i + 1}.**`;
+            return `${prefix} ${p.username} - **${formatAverage(p.average)}** avg (${p.games} games)`;
         });
+
+        const rankingChunks = chunkEntriesForFields(rankingEntries, {
+            separator: '\n',
+            maxFieldLength: DISCORD_EMBED_FIELD_LIMIT,
+            maxFields: 18,
+            maxTotalLength: 4800,
+            overflowLabel: 'player',
+        });
+
+        for (let i = 0; i < rankingChunks.length; i++) {
+            embed.addFields({
+                name: i === 0 ? '🏆 Player Rankings' : '\u200b',
+                value: rankingChunks[i],
+            });
+        }
     }
 
     // Best and worst scores of the week
