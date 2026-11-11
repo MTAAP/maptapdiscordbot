@@ -1,5 +1,5 @@
 import { EmbedBuilder } from 'discord.js';
-import type { DailyStats, RecordInfo } from '../database/queries';
+import type { DailyStats, RecordInfo, WeeklyStats } from '../database/queries';
 
 export function formatNumber(num: number): string {
     return num.toLocaleString('en-US', { maximumFractionDigits: 0 });
@@ -153,4 +153,63 @@ function formatDate(dateStr: string): string {
     // Convert "2026-11-11" to "Nov 11"
     const date = new Date(dateStr + 'T12:00:00');
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+export function createWeeklySummaryEmbed(stats: WeeklyStats): EmbedBuilder {
+    const embed = new EmbedBuilder()
+        .setTitle('📅 MapTap Weekly Summary')
+        .setDescription(`**${formatDate(stats.startDate)} - ${formatDate(stats.endDate)}**`)
+        .setColor(0xE67E22)
+        .setTimestamp();
+
+    if (stats.totalGames === 0) {
+        embed.addFields({
+            name: '📊 No Games This Week',
+            value: 'No MapTap scores were recorded this week.',
+        });
+        return embed;
+    }
+
+    // Week overview
+    embed.addFields({
+        name: '📊 Week Overview',
+        value: `• Total Games: **${stats.totalGames}**\n• Players: **${stats.totalPlayers}**\n• Weekly Average: **${formatAverage(stats.overallAverage)}** pts`,
+    });
+
+    // Player rankings (top 5)
+    const medals = ['🥇', '🥈', '🥉'];
+    const topPlayers = stats.playerStats.slice(0, 5);
+    if (topPlayers.length > 0) {
+        const rankingsText = topPlayers
+            .map((p, i) => {
+                const prefix = i < 3 ? medals[i] : `**${i + 1}.**`;
+                return `${prefix} ${p.username} - **${formatAverage(p.average)}** avg (${p.games} games)`;
+            })
+            .join('\n');
+        embed.addFields({
+            name: '🏆 Top Players This Week',
+            value: rankingsText,
+        });
+    }
+
+    // Best and worst scores of the week
+    if (stats.bestScore) {
+        embed.addFields({
+            name: '⭐ Best Score This Week',
+            value: `**${formatNumber(stats.bestScore.score)}** - ${stats.bestScore.username} (${formatDate(stats.bestScore.game_date)})`,
+            inline: true,
+        });
+    }
+
+    if (stats.worstScore && stats.totalPlayers > 1) {
+        embed.addFields({
+            name: '💩 Worst Score This Week',
+            value: `**${formatNumber(stats.worstScore.score)}** - ${stats.worstScore.username} (${formatDate(stats.worstScore.game_date)})`,
+            inline: true,
+        });
+    }
+
+    embed.setFooter({ text: 'See full stats with /maptap leaderboard' });
+
+    return embed;
 }

@@ -298,6 +298,94 @@ export function getRoundStats(): RoundStats[] {
     return roundStats;
 }
 
+// Weekly statistics
+
+export interface WeeklyPlayerStats {
+    user_id: string;
+    username: string;
+    games: number;
+    totalScore: number;
+    average: number;
+    best: number;
+    worst: number;
+}
+
+export interface WeeklyStats {
+    startDate: string;
+    endDate: string;
+    totalGames: number;
+    totalPlayers: number;
+    overallAverage: number;
+    playerStats: WeeklyPlayerStats[];
+    bestScore: { username: string; score: number; game_date: string } | null;
+    worstScore: { username: string; score: number; game_date: string } | null;
+}
+
+export function getWeeklyStats(startDate: string, endDate: string): WeeklyStats {
+    const stmt = db.prepare(`
+        SELECT * FROM scores
+        WHERE game_date >= ? AND game_date <= ?
+        ORDER BY score DESC
+    `);
+    const scores = stmt.all(startDate, endDate) as Score[];
+
+    if (scores.length === 0) {
+        return {
+            startDate,
+            endDate,
+            totalGames: 0,
+            totalPlayers: 0,
+            overallAverage: 0,
+            playerStats: [],
+            bestScore: null,
+            worstScore: null,
+        };
+    }
+
+    // Calculate per-player stats
+    const playerMap = new Map<string, { username: string; scores: number[] }>();
+    for (const s of scores) {
+        const existing = playerMap.get(s.user_id);
+        if (existing) {
+            existing.scores.push(s.score);
+        } else {
+            playerMap.set(s.user_id, { username: s.username, scores: [s.score] });
+        }
+    }
+
+    const playerStats: WeeklyPlayerStats[] = [];
+    for (const [user_id, data] of playerMap) {
+        const total = data.scores.reduce((a, b) => a + b, 0);
+        playerStats.push({
+            user_id,
+            username: data.username,
+            games: data.scores.length,
+            totalScore: total,
+            average: total / data.scores.length,
+            best: Math.max(...data.scores),
+            worst: Math.min(...data.scores),
+        });
+    }
+
+    // Sort by average score descending
+    playerStats.sort((a, b) => b.average - a.average);
+
+    const overallAverage = scores.reduce((sum, s) => sum + s.score, 0) / scores.length;
+    const best = scores[0];
+    const worst = scores[scores.length - 1];
+
+    return {
+        startDate,
+        endDate,
+        totalGames: scores.length,
+        totalPlayers: playerStats.length,
+        overallAverage,
+        playerStats,
+        bestScore: { username: best.username, score: best.score, game_date: best.game_date },
+        worstScore: { username: worst.username, score: worst.score, game_date: worst.game_date },
+    };
+}
+
 export function getUserEnhancedStats(userId: string): (EnhancedStats & { roundAverages: number[] }) | null {
     const stmt = db.prepare('SELECT * FROM scores WHERE user_id = ? ORDER BY score DESC');
     const scores = stmt.all(userId) as Score[];
