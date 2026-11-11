@@ -12,6 +12,7 @@ import { handleDelta } from './delta';
 import { handleImport } from './import';
 import { handleFullStats } from './fullstats';
 import { handleWorst } from './worst';
+import { handleAllPlayers } from './allplayers';
 
 type CommandHandler = (interaction: ChatInputCommandInteraction) => Promise<void>;
 
@@ -24,6 +25,7 @@ const commands: Map<string, CommandHandler> = new Map([
     ['import', handleImport],
     ['fullstats', handleFullStats],
     ['worst', handleWorst],
+    ['allplayers', handleAllPlayers],
 ]);
 
 export async function handleInteraction(interaction: Interaction): Promise<void> {
@@ -93,6 +95,10 @@ export function getCommandData(): RESTPostAPIChatInputApplicationCommandsJSONBod
         .addSubcommand(sub =>
             sub.setName('worst')
                 .setDescription('Show the worst scores ever recorded')
+        )
+        .addSubcommand(sub =>
+            sub.setName('allplayers')
+                .setDescription('Show all players ranked by average score')
         );
 
     return [maptapCommand.toJSON()];
