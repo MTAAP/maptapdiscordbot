@@ -46,9 +46,6 @@ export function parseMapTapMessage(content: string): ParsedMapTapScore | null {
 
 export function normalizeGameDate(gameDateStr: string, timezone: string): string {
     // Convert "November 11" to "2026-11-11" format
-    // Assume current year if not provided
-    const currentYear = new Date().toLocaleDateString('en-CA', { timeZone: timezone, year: 'numeric' }).split('-')[0];
-
     const months: Record<string, string> = {
         'january': '01', 'february': '02', 'march': '03', 'april': '04',
         'may': '05', 'june': '06', 'july': '07', 'august': '08',
@@ -67,5 +64,19 @@ export function normalizeGameDate(gameDateStr: string, timezone: string): string
         return gameDateStr;
     }
 
-    return `${currentYear}-${month}-${day}`;
+    // Determine the correct year
+    // If game date is December and current month is January, use previous year
+    // If game date is January and current month is December, use next year
+    const now = new Date();
+    const currentMonth = now.toLocaleDateString('en-CA', { timeZone: timezone, month: '2-digit' });
+    const currentYear = parseInt(now.toLocaleDateString('en-CA', { timeZone: timezone, year: 'numeric' }));
+
+    let year = currentYear;
+    if (month === '12' && currentMonth === '01') {
+        year = currentYear - 1;
+    } else if (month === '01' && currentMonth === '12') {
+        year = currentYear + 1;
+    }
+
+    return `${year}-${month}-${day}`;
 }
