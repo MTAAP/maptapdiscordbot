@@ -49,6 +49,16 @@ export function createDailySummaryEmbed(
         value: topScoresText || 'No scores yet',
     });
 
+    // Worst player of the day
+    if (stats.worstScore && stats.totalGames > 1) {
+        const delta = stats.worstScore.score - stats.average;
+        const deltaStr = `(${formatAverage(delta)})`;
+        embed.addFields({
+            name: '💩 Worst Today',
+            value: `${stats.worstScore.username} - **${formatNumber(stats.worstScore.score)}** pts ${deltaStr}`,
+        });
+    }
+
     // Records broken
     if (records.length > 0) {
         const recordsText = records.map(r => {

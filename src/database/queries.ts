@@ -15,6 +15,7 @@ export interface DailyStats {
     average: number;
     totalGames: number;
     topScores: Array<{ user_id: string; username: string; score: number }>;
+    worstScore: { user_id: string; username: string; score: number } | null;
 }
 
 export interface UserStats {
@@ -70,11 +71,14 @@ export function getDailyStats(date: string): DailyStats {
     const scores = getScoresForDate(date);
 
     if (scores.length === 0) {
-        return { average: 0, totalGames: 0, topScores: [] };
+        return { average: 0, totalGames: 0, topScores: [], worstScore: null };
     }
 
     const total = scores.reduce((sum, s) => sum + s.score, 0);
     const average = total / scores.length;
+
+    // Get the worst score (last in the array since it's sorted DESC)
+    const worst = scores[scores.length - 1];
 
     return {
         average,
@@ -84,6 +88,11 @@ export function getDailyStats(date: string): DailyStats {
             username: s.username,
             score: s.score,
         })),
+        worstScore: {
+            user_id: worst.user_id,
+            username: worst.username,
+            score: worst.score,
+        },
     };
 }
 
