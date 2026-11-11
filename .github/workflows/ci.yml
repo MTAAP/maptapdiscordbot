@@ -14,17 +14,16 @@ concurrency:
 jobs:
   build-check:
     name: Typecheck and build
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, X64, mtaap]
-    timeout-minutes: 15
-    container:
-      image: node:24-bookworm-slim
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
-      - name: Install native build tools
-        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends python3 make g++ >/dev/null
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+          cache: npm
       - name: Install, build, and smoke-check SQLite binding
         run: |
           set -euo pipefail

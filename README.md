@@ -73,7 +73,7 @@ npm start
 
 ## Deployment
 
-Pushes to `master` run `.github/workflows/build-and-deploy.yml` on the `mtaap` self-hosted runners. After typechecking and building in `ci.yml`, the workflow publishes `ghcr.io/mtaap/maptapdiscordbot:master` and triggers a stop-then-start deployment on Coolify (`free-fsn1-01`).
+Pushes to `master` run `.github/workflows/build-and-deploy.yml` on GitHub Actions (`ubuntu-latest`). After typechecking and building in `ci.yml`, the workflow publishes `ghcr.io/mtaap/maptapdiscordbot:master` and triggers a stop-then-start deployment on Coolify (`free-fsn1-01`).
 
 Runtime configuration comes from Infisical EU (`maptapdiscordbot`, environment `prod`, folder `/app`), and SQLite persists on the `/data` volume (`DATABASE_PATH=/data/maptap.db`). On startup the bot registers guild slash commands and backfills channel score history if the database is empty.
 
