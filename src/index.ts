@@ -5,6 +5,7 @@ import { startBot } from './bot/client';
 import { syncGuildCommands } from './deploy-commands';
 import { backfillIfDatabaseEmpty } from './services/channelImport';
 import { syncMissingChallenges } from './services/challengeSync';
+import { shutdownLlmPlayer } from './services/llmPlayer';
 import {
     startDailyScheduler,
     startLlmPlayerScheduler,
@@ -49,12 +50,15 @@ async function main(): Promise<void> {
     startLlmPlayerScheduler();
 
     let shuttingDown = false;
-    const shutdown = () => {
+    const shutdown = async () => {
         if (shuttingDown) return;
         shuttingDown = true;
         console.log('Shutting down Mappy...');
         clearInterval(heartbeatTimer);
         client.destroy();
+        await shutdownLlmPlayer().catch(error => {
+            console.warn('LLM player shutdown cleanup failed:', error);
+        });
         try {
             checkpointDatabase();
         } catch (error) {
@@ -64,8 +68,12 @@ async function main(): Promise<void> {
         process.exit(0);
     };
 
-    process.on('SIGINT', shutdown);
-    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', () => {
+        void shutdown();
+    });
+    process.on('SIGTERM', () => {
+        void shutdown();
+    });
 }
 
 main().catch(error => {

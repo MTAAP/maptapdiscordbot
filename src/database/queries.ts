@@ -1,4 +1,5 @@
 import { db } from './index';
+import { config } from '../config';
 import { getTodayDate } from '../utils/dates';
 import { countryCodeToFlag, findCountryIsoByQuery, getCountryMetadata } from '../services/geography';
 
@@ -779,12 +780,13 @@ export function getMissingChallengeDates(): string[] {
 }
 
 export function getChallengeCoverage(): { syncedDays: number; scoredDays: number } {
+    const todayCutoff = getTodayDate(config.timezone);
     const syncedRow = db
-        .prepare('SELECT COUNT(DISTINCT game_date) as c FROM daily_challenges')
-        .get() as { c: number };
+        .prepare('SELECT COUNT(DISTINCT game_date) as c FROM daily_challenges WHERE game_date < ?')
+        .get(todayCutoff) as { c: number };
     const scoredRow = db
-        .prepare('SELECT COUNT(DISTINCT game_date) as c FROM scores')
-        .get() as { c: number };
+        .prepare('SELECT COUNT(DISTINCT game_date) as c FROM scores WHERE game_date < ?')
+        .get(todayCutoff) as { c: number };
     return { syncedDays: syncedRow.c, scoredDays: scoredRow.c };
 }
 
@@ -863,9 +865,10 @@ function loadJoinedRoundAttempts(): {
     attempts: JoinedRoundAttempt[];
     challenges: DailyChallengeRound[];
 } {
+    const todayCutoff = getTodayDate(config.timezone);
     const challenges = db
-        .prepare('SELECT * FROM daily_challenges ORDER BY game_date ASC, round_num ASC')
-        .all() as DailyChallengeRound[];
+        .prepare('SELECT * FROM daily_challenges WHERE game_date < ? ORDER BY game_date ASC, round_num ASC')
+        .all(todayCutoff) as DailyChallengeRound[];
 
     if (challenges.length === 0) {
         return { attempts: [], challenges: [] };
@@ -1012,11 +1015,12 @@ export function resolveGeoArea(rawQuery: string): GeoAreaFilter | null {
         };
     }
 
+    const todayCutoff = getTodayDate(config.timezone);
     const dbCountry = db
         .prepare(
-            'SELECT country_code, country_name FROM daily_challenges WHERE LOWER(country_name) LIKE ? LIMIT 1'
+            'SELECT country_code, country_name FROM daily_challenges WHERE game_date < ? AND LOWER(country_name) LIKE ? LIMIT 1'
         )
-        .get(`%${lower}%`) as { country_code: string; country_name: string } | undefined;
+        .get(todayCutoff, `%${lower}%`) as { country_code: string; country_name: string } | undefined;
     if (dbCountry) {
         return {
             kind: 'country',
@@ -1031,22 +1035,23 @@ export function resolveGeoArea(rawQuery: string): GeoAreaFilter | null {
 
 export function getGeoAutocompleteChoices(query: string): Array<{ name: string; value: string }> {
     const q = query.trim().toLowerCase();
+    const todayCutoff = getTodayDate(config.timezone);
 
     const contRows = db
         .prepare(
-            'SELECT continent as label, COUNT(*) as c FROM daily_challenges GROUP BY continent ORDER BY c DESC'
+            'SELECT continent as label, COUNT(*) as c FROM daily_challenges WHERE game_date < ? GROUP BY continent ORDER BY c DESC'
         )
-        .all() as Array<{ label: string; c: number }>;
+        .all(todayCutoff) as Array<{ label: string; c: number }>;
     const subRows = db
         .prepare(
-            'SELECT subregion as label, COUNT(*) as c FROM daily_challenges GROUP BY subregion ORDER BY c DESC'
+            'SELECT subregion as label, COUNT(*) as c FROM daily_challenges WHERE game_date < ? GROUP BY subregion ORDER BY c DESC'
         )
-        .all() as Array<{ label: string; c: number }>;
+        .all(todayCutoff) as Array<{ label: string; c: number }>;
     const countryRows = db
         .prepare(
-            'SELECT country_code, country_name as label, COUNT(*) as c FROM daily_challenges GROUP BY country_code ORDER BY c DESC'
+            'SELECT country_code, country_name as label, COUNT(*) as c FROM daily_challenges WHERE game_date < ? GROUP BY country_code ORDER BY c DESC'
         )
-        .all() as Array<{ country_code: string; label: string; c: number }>;
+        .all(todayCutoff) as Array<{ country_code: string; label: string; c: number }>;
 
     const candidates: Array<{ name: string; value: string; count: number; matchRank: number }> = [];
     const seenValues = new Set<string>();

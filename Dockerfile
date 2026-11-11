@@ -13,6 +13,7 @@ FROM node:24-bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         chromium \
+        chromium-sandbox \
         fonts-liberation \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -23,7 +24,7 @@ COPY package.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 
-RUN mkdir -p /data && chown node:node /data
+RUN mkdir -p /data && chown node:node /data && chmod 700 /data
 ENV NODE_ENV=production
 ENV DATABASE_PATH=/data/maptap.db
 ENV CHROME_PATH=/usr/bin/chromium

@@ -296,12 +296,43 @@ function stripOldImages(messages: ChatMessage[]): void {
     }
 }
 
+const SAFE_BROWSER_ENV_KEYS = [
+    'PATH',
+    'LANG',
+    'LC_ALL',
+    'FONTCONFIG_PATH',
+    'SYSTEMROOT',
+    'DISPLAY',
+] as const;
+
+/**
+ * Builds a minimal child-process environment for headless Chromium so application
+ * secrets (DISCORD_TOKEN, SVPG_API_KEY, DATABASE_PATH) never enter the browser process.
+ */
+export function buildSanitizedBrowserEnv(timezone: string, profileDir: string): NodeJS.ProcessEnv {
+    const cleanEnv: NodeJS.ProcessEnv = {
+        TZ: timezone,
+        HOME: profileDir,
+        TMPDIR: profileDir,
+        XDG_CONFIG_HOME: profileDir,
+        XDG_CACHE_HOME: profileDir,
+    };
+    for (const key of SAFE_BROWSER_ENV_KEYS) {
+        const val = process.env[key];
+        if (val) {
+            cleanEnv[key] = val;
+        }
+    }
+    return cleanEnv;
+}
+
 async function callGatewayModel(
     baseUrl: string,
     apiKey: string,
     model: string,
     messages: ChatMessage[],
-    reasoningEffort: 'low' | 'medium' | 'xhigh'
+    reasoningEffort: 'low' | 'medium' | 'xhigh',
+    abortSignal?: AbortSignal
 ): Promise<{
     msg: { content?: string | null; reasoning_content?: string; tool_calls: ChatToolCall[] };
     usage: {
@@ -314,8 +345,16 @@ async function callGatewayModel(
     let lastError: Error | null = null;
 
     for (let attempt = 1; attempt <= 3; attempt++) {
+        if (abortSignal?.aborted) {
+            throw new Error('LLM player run aborted');
+        }
         const t0 = performance.now();
         try {
+            const timeoutSignal = AbortSignal.timeout(300_000);
+            const combinedSignal = abortSignal
+                ? AbortSignal.any([timeoutSignal, abortSignal])
+                : timeoutSignal;
+
             const res = await fetch(`${baseUrl}/chat/completions`, {
                 method: 'POST',
                 headers: {
@@ -329,7 +368,7 @@ async function callGatewayModel(
                     tools: TOOLS,
                     tool_choice: 'required',
                 }),
-                signal: AbortSignal.timeout(300_000),
+                signal: combinedSignal,
             });
             const wallMs = Math.round(performance.now() - t0);
 
@@ -373,6 +412,9 @@ async function callGatewayModel(
             };
         } catch (err) {
             lastError = err instanceof Error ? err : new Error(String(err));
+            if (abortSignal?.aborted) {
+                throw lastError;
+            }
             if (attempt < 3) {
                 await sleep(1500 * attempt);
             }
@@ -382,11 +424,17 @@ async function callGatewayModel(
     throw lastError ?? new Error('SVPG Gateway call failed');
 }
 
-async function launchIsolatedChrome(
+function isRunningInsideLinuxContainer(): boolean {
+    if (process.platform !== 'linux') return false;
+    return fs.existsSync('/.dockerenv') || fs.existsSync('/run/.containerenv');
+}
+
+async function spawnIsolatedChromeOnce(
     chromeBin: string,
     profileDir: string,
     timezone: string,
-    useSwiftShader: boolean
+    useSwiftShader: boolean,
+    disableOsSandbox: boolean
 ): Promise<{ proc: ChildProcess; cdp: CDPClient }> {
     const isLinux = process.platform === 'linux';
     const args = [
@@ -399,61 +447,101 @@ async function launchIsolatedChrome(
         '--no-first-run',
         '--no-default-browser-check',
         '--disable-background-networking',
+        '--disable-extensions',
+        '--disable-sync',
+        '--site-per-process',
         '--enable-webgl',
         '--ignore-gpu-blocklist',
-        ...(isLinux ? ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] : []),
+        ...(isLinux ? ['--disable-dev-shm-usage'] : []),
+        ...(disableOsSandbox ? ['--no-sandbox', '--disable-setuid-sandbox'] : []),
         ...(useSwiftShader ? ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] : []),
         'about:blank',
     ];
 
     const proc = spawn(chromeBin, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, TZ: timezone },
+        env: buildSanitizedBrowserEnv(timezone, profileDir),
     });
 
-    const wsBrowserUrl = await new Promise<string>((resolve, reject) => {
-        let stderr = '';
-        const timer = setTimeout(
-            () => reject(new Error(`Timed out waiting for Chromium DevTools: ${stderr.slice(-400)}`)),
-            20_000
-        );
-        proc.stderr?.on('data', (chunk: Buffer) => {
-            stderr += chunk.toString();
-            const m = stderr.match(/DevTools listening on (ws:\/\/[^\s]+)/);
-            if (m) {
+    let cdp: CDPClient | null = null;
+    try {
+        const wsBrowserUrl = await new Promise<string>((resolve, reject) => {
+            let stderr = '';
+            const timer = setTimeout(
+                () => reject(new Error(`Timed out waiting for Chromium DevTools: ${stderr.slice(-400)}`)),
+                20_000
+            );
+            proc.stderr?.on('data', (chunk: Buffer) => {
+                stderr += chunk.toString();
+                const m = stderr.match(/DevTools listening on (ws:\/\/[^\s]+)/);
+                if (m) {
+                    clearTimeout(timer);
+                    resolve(m[1]);
+                }
+            });
+            proc.once('error', err => {
                 clearTimeout(timer);
-                resolve(m[1]);
-            }
+                reject(err);
+            });
+            proc.once('exit', code => {
+                clearTimeout(timer);
+                reject(new Error(`Chromium exited early (code=${code}): ${stderr.slice(-400)}`));
+            });
         });
-        proc.once('exit', code => {
-            clearTimeout(timer);
-            reject(new Error(`Chromium exited early (code=${code}): ${stderr.slice(-400)}`));
-        });
-    });
 
-    const port = new URL(wsBrowserUrl).port;
-    const targetsRes = await fetch(`http://127.0.0.1:${port}/json/list`, {
-        signal: AbortSignal.timeout(10_000),
-    });
-    const targets = (await targetsRes.json()) as Array<{ type: string; webSocketDebuggerUrl?: string }>;
-    const pageTarget = targets.find(t => t.type === 'page' && t.webSocketDebuggerUrl);
-    if (!pageTarget?.webSocketDebuggerUrl) {
-        throw new Error('No debuggable page target found in headless Chromium');
+        const port = new URL(wsBrowserUrl).port;
+        const targetsRes = await fetch(`http://127.0.0.1:${port}/json/list`, {
+            signal: AbortSignal.timeout(10_000),
+        });
+        const targets = (await targetsRes.json()) as Array<{ type: string; webSocketDebuggerUrl?: string }>;
+        const pageTarget = targets.find(t => t.type === 'page' && t.webSocketDebuggerUrl);
+        if (!pageTarget?.webSocketDebuggerUrl) {
+            throw new Error('No debuggable page target found in headless Chromium');
+        }
+
+        cdp = new CDPClient(pageTarget.webSocketDebuggerUrl);
+        await cdp.connect();
+        await cdp.send('Page.enable');
+        await cdp.send('Runtime.enable');
+        await cdp.send('Emulation.setDeviceMetricsOverride', {
+            width: 900,
+            height: 900,
+            deviceScaleFactor: 1,
+            mobile: false,
+        });
+        await cdp.send('Emulation.setTimezoneOverride', { timezoneId: timezone }).catch(() => {});
+
+        return { proc, cdp };
+    } catch (error) {
+        await terminateChromeProcess(proc, cdp);
+        throw error;
     }
+}
 
-    const cdp = new CDPClient(pageTarget.webSocketDebuggerUrl);
-    await cdp.connect();
-    await cdp.send('Page.enable');
-    await cdp.send('Runtime.enable');
-    await cdp.send('Emulation.setDeviceMetricsOverride', {
-        width: 900,
-        height: 900,
-        deviceScaleFactor: 1,
-        mobile: false,
-    });
-    await cdp.send('Emulation.setTimezoneOverride', { timezoneId: timezone }).catch(() => {});
-
-    return { proc, cdp };
+async function launchIsolatedChrome(
+    chromeBin: string,
+    profileDir: string,
+    timezone: string,
+    useSwiftShader: boolean
+): Promise<{ proc: ChildProcess; cdp: CDPClient }> {
+    try {
+        return await spawnIsolatedChromeOnce(chromeBin, profileDir, timezone, useSwiftShader, false);
+    } catch (firstErr) {
+        const msg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+        const isContainerNamespaceDenial =
+            isRunningInsideLinuxContainer() &&
+            process.env.CHROMIUM_STRICT_SANDBOX !== '1' &&
+            (msg.includes('No usable sandbox') ||
+                msg.includes('Failed to move to new namespace') ||
+                msg.includes('Operation not permitted'));
+        if (!isContainerNamespaceDenial) {
+            throw firstErr;
+        }
+        console.warn(
+            '[LLM Player] Container seccomp blocked nested Chromium namespaces; falling back to container-isolated headless mode'
+        );
+        return spawnIsolatedChromeOnce(chromeBin, profileDir, timezone, useSwiftShader, true);
+    }
 }
 
 async function terminateChromeProcess(proc: ChildProcess | null, cdp: CDPClient | null): Promise<void> {
@@ -850,25 +938,54 @@ export interface RunLlmChallengeOptions {
     forceReplay?: boolean;
 }
 
-let activeLlmRunPromise: Promise<LlmDailyRunRecord | null> | null = null;
+interface ActiveBrowserSession {
+    proc: ChildProcess | null;
+    cdp: CDPClient | null;
+    profileDir: string;
+    abortController: AbortController;
+}
+
+const inFlightByDate = new Map<string, Promise<LlmDailyRunRecord | null>>();
+let browserSerialQueue: Promise<unknown> = Promise.resolve();
+let currentBrowserSession: ActiveBrowserSession | null = null;
+let playerShuttingDown = false;
 
 export function isLlmRunInProgress(): boolean {
-    return activeLlmRunPromise !== null;
+    return inFlightByDate.size > 0 || currentBrowserSession !== null;
+}
+
+export async function shutdownLlmPlayer(): Promise<void> {
+    playerShuttingDown = true;
+    const active = currentBrowserSession;
+    if (active) {
+        active.abortController.abort();
+        await terminateChromeProcess(active.proc, active.cdp);
+        try {
+            fs.rmSync(active.profileDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 150 });
+        } catch {
+            // ignore temp cleanup error
+        }
+    }
+    await Promise.race([browserSerialQueue.catch(() => null), sleep(3000)]);
 }
 
 export async function runLlmDailyChallenge(
     gameDate: string = getTodayDate(config.timezone),
     options: RunLlmChallengeOptions = {}
 ): Promise<LlmDailyRunRecord | null> {
+    if (playerShuttingDown) {
+        return null;
+    }
+
     if (!options.forceReplay) {
         const existing = getLlmDailyRun(gameDate);
         if (existing?.status === 'completed') {
             return existing;
         }
-    }
-
-    if (activeLlmRunPromise) {
-        return activeLlmRunPromise;
+        const pendingSameDate = inFlightByDate.get(gameDate);
+        if (pendingSameDate) {
+            return pendingSameDate;
+        }
     }
 
     const apiKey = options.apiKey ?? config.llm.apiKey;
@@ -885,10 +1002,34 @@ export async function runLlmDailyChallenge(
     }
 
     const executeRun = async (): Promise<LlmDailyRunRecord | null> => {
+        if (playerShuttingDown) {
+            return null;
+        }
+        if (!options.forceReplay) {
+            const existing = getLlmDailyRun(gameDate);
+            if (existing?.status === 'completed') {
+                return existing;
+            }
+        }
+
         const matchStart = performance.now();
         const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'maptap-llm-chrome-'));
-        let chromeProc: ChildProcess | null = null;
-        let cdp: CDPClient | null = null;
+        fs.chmodSync(profileDir, 0o700);
+        const abortController = new AbortController();
+        const session: ActiveBrowserSession = {
+            proc: null,
+            cdp: null,
+            profileDir,
+            abortController,
+        };
+        currentBrowserSession = session;
+
+        try {
+            fs.mkdirSync(replaysDir, { recursive: true });
+            pruneOldReplayGifs(replaysDir);
+        } catch {
+            // ignore retention pre-prune errors
+        }
 
         upsertLlmDailyRunStart(gameDate, model, LLM_PLAYER_MODE);
         console.log(`[LLM Player] Starting ${model} (${LLM_PLAYER_MODE}) for ${gameDate}...`);
@@ -903,8 +1044,9 @@ export async function runLlmDailyChallenge(
                 timezone,
                 preferSwiftShaderOnBoot
             );
-            chromeProc = launched.proc;
-            cdp = launched.cdp;
+            session.proc = launched.proc;
+            session.cdp = launched.cdp;
+            let cdp = launched.cdp;
 
             const bootstrapStorageScript = `
                 localStorage.setItem('maptap_history_setaside', '1');
@@ -936,9 +1078,10 @@ export async function runLlmDailyChallenge(
 
             if (!hasValidCanvas && !preferSwiftShaderOnBoot) {
                 console.log('[LLM Player] Retrying headless Chromium with Angle SwiftShader WebGL...');
-                await terminateChromeProcess(chromeProc, cdp);
+                await terminateChromeProcess(session.proc, session.cdp);
                 const fallback = await launchIsolatedChrome(chromeBin, profileDir, timezone, true);
-                chromeProc = fallback.proc;
+                session.proc = fallback.proc;
+                session.cdp = fallback.cdp;
                 cdp = fallback.cdp;
                 await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
                     source: bootstrapStorageScript,
@@ -1014,7 +1157,8 @@ export async function runLlmDailyChallenge(
                         apiKey,
                         model,
                         messages,
-                        reasoningEffort
+                        reasoningEffort,
+                        abortController.signal
                     );
 
                     totalPromptTokens += usage.prompt_tokens ?? 0;
@@ -1341,7 +1485,10 @@ export async function runLlmDailyChallenge(
             failLlmDailyRun(gameDate, msg);
             return getLlmDailyRun(gameDate);
         } finally {
-            await terminateChromeProcess(chromeProc, cdp);
+            await terminateChromeProcess(session.proc, session.cdp);
+            if (currentBrowserSession === session) {
+                currentBrowserSession = null;
+            }
             try {
                 fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 150 });
             } catch {
@@ -1350,8 +1497,21 @@ export async function runLlmDailyChallenge(
         }
     };
 
-    activeLlmRunPromise = executeRun().finally(() => {
-        activeLlmRunPromise = null;
+    const scheduledPromise = browserSerialQueue.then(
+        () => executeRun(),
+        () => executeRun()
+    );
+    browserSerialQueue = scheduledPromise.then(
+        () => undefined,
+        () => undefined
+    );
+
+    if (!options.forceReplay) {
+        inFlightByDate.set(gameDate, scheduledPromise);
+    }
+    return scheduledPromise.finally(() => {
+        if (inFlightByDate.get(gameDate) === scheduledPromise) {
+            inFlightByDate.delete(gameDate);
+        }
     });
-    return activeLlmRunPromise;
 }

@@ -7,7 +7,7 @@ A Discord bot that tracks MapTap geography game scores, posts daily and weekly s
 - **Automatic Score Detection**: Monitors a channel for MapTap score messages (`www.maptap.gg`, `https://maptap.gg`, or `MapTap <Month> <Day>`, including flag-prefixed round scores)
 - **Daily and Weekly Summaries**: Automated daily recap at `SUMMARY_HOUR:00` and Monday weekly recap at `SUMMARY_HOUR:05` in `TIMEZONE`
 - **Regional Standings and Passports**: Syncs daily challenge locations from `maptap.gg` and ranks players by UN M49 continent, subregion, and country
-- **Daily `local-smart` Challenger**: Optional headless Chromium player that navigates `maptap.gg/?letmeplay=1` using only screenshots and keyboard controls (`WASD`, `QE`, `Shift`, `Space`), posts a spoiler-free daytime benchmark, and attaches an animated replay GIF to the midnight recap
+- **Daily `local-smart` Challenger**: Optional headless Chromium player that navigates `maptap.gg/?letmeplay=1` using only screenshots and keyboard controls (`WASD`, `QE`, `Shift`, `Space`), shows a spoiler-free daytime benchmark, and attaches an animated replay GIF to the `SUMMARY_HOUR:00` recap on days with recorded games (or on demand via `/maptap llm`)
 - **All-Time Leaderboards**: Best averages, highest scores, worst scores, per-round breakdowns, and biggest daily deltas
 - **Record Tracking**: Announces when all-time high scores are broken
 
@@ -122,7 +122,7 @@ SQLite database stored at `DATABASE_PATH` (`./maptap.db` locally, `/data/maptap.
 - `scores`: Individual human daily game scores
 - `records`: All-time record-breaking achievements
 - `daily_challenges`: Synced 5-round daily challenge locations and ISO/UN M49 geography tags
-- `llm_daily_runs`: Separate `local-smart` daily runs, round monologues, token counts, and replay GIF paths (`replays/<YYYY-MM-DD>.gif`, 30-day retention)
+- `llm_daily_runs`: Separate `local-smart` daily runs, round monologues, token counts, and replay GIF paths (`replays/<YYYY-MM-DD>.gif`, pruned past 30 days on each daily run)
 - `meta`: Operational state markers (`initial_backfill_complete`)
 
 ## License

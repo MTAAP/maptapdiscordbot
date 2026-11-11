@@ -37,6 +37,7 @@ const messageCreateMod = await import('../dist/bot/events/messageCreate.js');
 const commandsMod = await import('../dist/bot/commands/index.js');
 const importCmdMod = await import('../dist/bot/commands/import.js');
 const llmCmdMod = await import('../dist/bot/commands/llm.js');
+const llmPlayerMod = await import('../dist/services/llmPlayer.js');
 const channelImportMod = await import('../dist/services/channelImport.js');
 const schedulerMod = await import('../dist/services/scheduler.js');
 const weeklyMod = await import('../dist/bot/commands/weekly.js');
@@ -591,6 +592,25 @@ cities = [
         new Date('2026-11-11T12:00:00Z')
     );
     assert.equal(missing2024, null, 'Must fail closed rather than misattributing 2026 cities to 2024');
+
+    // Static parser must never execute injected JS expressions or template interpolations
+    const maliciousScript = `
+cities = [
+    { id: "2026-11-12-1", name: "Oslo, Norway", lat: 59.91, lng: 10.75, rce: cities.constructor.constructor("throw new Error('RCE')")() },
+    { id: "2026-11-12-2", name: "Paris, France", lat: 48.85, lng: 2.35, tpl: \`\${(() => { throw new Error('TPL'); })()}\` },
+    { id: "2026-11-12-3", name: "Tokyo, Japan", lat: 35.68, lng: 139.69 },
+    { id: "2026-11-12-4", name: "Cairo, Egypt", lat: 30.04, lng: 31.23 },
+    { id: "2026-11-12-5", name: "Lima, Peru", lat: -12.04, lng: -77.04 }
+];
+`;
+    const safeParsed = challengeSyncMod.parseChallengeScript(
+        maliciousScript,
+        '2026-11-12',
+        new Date('2026-11-12T12:00:00Z')
+    );
+    assert.equal(safeParsed?.length, 5);
+    assert.equal(safeParsed[0].name, 'Oslo, Norway');
+    assert.equal(safeParsed[0].countryCode, 'NO');
 });
 
 test('Phase 1: regional standings, passport, and daily summary spoiler gate work accurately', () => {
@@ -598,19 +618,43 @@ test('Phase 1: regional standings, passport, and daily summary spoiler gate work
 
     const parsed = challengeSyncMod.parseChallengeScript(
         `cities = [
-            { id: "2026-11-11-1", name: "Leipzig, Germany", lat: 51.3397, lng: 12.3731 },
-            { id: "2026-11-11-2", name: "Lyon, France", lat: 45.7640, lng: 4.8357 },
-            { id: "2026-11-11-3", name: "Syracuse, New York, USA", lat: 43.0481, lng: -76.1474 },
-            { id: "2026-11-11-4", name: "Chicago, Illinois, USA", lat: 41.8781, lng: -87.6298 },
-            { id: "2026-11-11-5", name: "Kanazawa, Japan", lat: 36.5611, lng: 136.6566 }
+            { id: "2026-11-01-1", name: "Leipzig, Germany", lat: 51.3397, lng: 12.3731 },
+            { id: "2026-11-01-2", name: "Lyon, France", lat: 45.7640, lng: 4.8357 },
+            { id: "2026-11-01-3", name: "Syracuse, New York, USA", lat: 43.0481, lng: -76.1474 },
+            { id: "2026-11-01-4", name: "Chicago, Illinois, USA", lat: 41.8781, lng: -87.6298 },
+            { id: "2026-11-01-5", name: "Kanazawa, Japan", lat: 36.5611, lng: 136.6566 }
         ];`,
-        '2026-11-11'
+        '2026-11-01'
     );
     queries.upsertDailyChallengeRounds(parsed);
 
     // Alice crushes Western Europe (100, 98), Bob crushes Northern America (99, 100)
-    queries.insertScore('u_alice', 'Alice', 880, [100, 98, 80, 82, 90], '2026-11-11', 'm_a1');
-    queries.insertScore('u_bob', 'Bob', 920, [84, 86, 99, 100, 90], '2026-11-11', 'm_b1');
+    queries.insertScore('u_alice', 'Alice', 880, [100, 98, 80, 82, 90], '2026-11-01', 'm_a1');
+    queries.insertScore('u_bob', 'Bob', 920, [84, 86, 99, 100, 90], '2026-11-01', 'm_b1');
+
+    // Seed an active TODAY challenge + human score: regional queries and autocomplete must NOT leak it before midnight
+    const todayIso = queries.getTodayDate('Europe/Amsterdam');
+    const todayParsed = challengeSyncMod.parseChallengeScript(
+        `cities = [
+            { id: "${todayIso}-1", name: "Reykjavik, Iceland", lat: 64.1466, lng: -21.9426 },
+            { id: "${todayIso}-2", name: "Bergen, Norway", lat: 60.3913, lng: 5.3221 },
+            { id: "${todayIso}-3", name: "Lima, Peru", lat: -12.0464, lng: -77.0428 },
+            { id: "${todayIso}-4", name: "Quito, Ecuador", lat: -0.1807, lng: -78.4678 },
+            { id: "${todayIso}-5", name: "Suva, Fiji", lat: -18.1416, lng: 178.4419 }
+        ];`,
+        todayIso,
+        new Date(`${todayIso}T12:00:00Z`)
+    );
+    queries.upsertDailyChallengeRounds(todayParsed);
+    queries.insertScore('u_alice', 'Alice', 990, [100, 100, 100, 100, 90], todayIso, 'm_a_today');
+
+    const neArea = queries.resolveGeoArea('Northern Europe');
+    const neBoard = queries.getGeoLeaderboard(neArea, 1);
+    assert.equal(neBoard.totalChallengeRounds, 0, 'Today Northern Europe rounds must stay spoiler-locked until midnight');
+    assert.equal(neBoard.easiestLocation, null);
+
+    const icelandChoices = queries.getGeoAutocompleteChoices('Iceland');
+    assert.equal(icelandChoices.length, 0, 'Autocomplete must not reveal unreleased today countries');
 
     const weArea = queries.resolveGeoArea('Western Europe');
     assert.equal(weArea?.kind, 'subregion');
@@ -626,21 +670,22 @@ test('Phase 1: regional standings, passport, and daily summary spoiler gate work
     assert.equal(naBoard.standings[0].meanAccuracy, 99.5);
 
     const passport = queries.getUserPassport('u_alice');
+    assert.equal(passport?.totalSyncedRounds, 5, 'Passport must exclude today unreleased rounds');
     assert.equal(passport?.strongestSubregions[0].label, 'Western Europe');
     assert.equal(passport?.weakestSubregions[0].label, 'Northern America');
 
     // Spoiler gate: live /maptap daily hides city names; midnight summary reveals them
-    const stats = queries.getDailyStats('2026-11-11');
-    const breakdown = queries.getDailyChallengeBreakdown('2026-11-11');
+    const stats = queries.getDailyStats('2026-11-01');
+    const breakdown = queries.getDailyChallengeBreakdown('2026-11-01');
 
-    const liveEmbed = embeds.createDailySummaryEmbed('2026-11-11', stats, []).toJSON();
+    const liveEmbed = embeds.createDailySummaryEmbed('2026-11-01', stats, []).toJSON();
     assert.ok(
         !JSON.stringify(liveEmbed).includes('Leipzig'),
         'Live daily embed must not leak today city names'
     );
 
     const midnightEmbed = embeds
-        .createDailySummaryEmbed('2026-11-11', stats, [], {
+        .createDailySummaryEmbed('2026-11-01', stats, [], {
             revealCities: true,
             roundBreakdown: breakdown,
         })
@@ -799,6 +844,34 @@ test('Phase 2: llm_daily_runs keeps human scores pure, computes W-L rivalry, and
     });
     assert.equal(spoilerReply?.ephemeral, true);
     assert.ok(JSON.stringify(spoilerReply).includes('Spoiler Gate Active'));
+
+    // Browser child environment must strip DISCORD_TOKEN, SVPG_API_KEY, and DATABASE_PATH
+    process.env.SVPG_API_KEY = 'secret-svpg-key-must-not-leak';
+    const childEnv = llmPlayerMod.buildSanitizedBrowserEnv('Europe/Amsterdam', '/tmp/isolated-prof');
+    assert.equal(childEnv.DISCORD_TOKEN, undefined);
+    assert.equal(childEnv.SVPG_API_KEY, undefined);
+    assert.equal(childEnv.DATABASE_PATH, undefined);
+    assert.equal(childEnv.HOME, '/tmp/isolated-prof');
+    assert.equal(childEnv.TZ, 'Europe/Amsterdam');
+    delete process.env.SVPG_API_KEY;
+
+    // Distinct dates must not coalesce onto another date's in-flight promise
+    const bogusChrome = path.join(tmpDir, 'nonexistent-chrome-bin');
+    fs.writeFileSync(bogusChrome, '');
+    const [resDayA, resDayB] = await Promise.all([
+        llmPlayerMod.runLlmDailyChallenge('2026-11-08', {
+            apiKey: 'dummy',
+            chromePath: bogusChrome,
+            forceReplay: true,
+        }),
+        llmPlayerMod.runLlmDailyChallenge('2026-11-09', {
+            apiKey: 'dummy',
+            chromePath: bogusChrome,
+            forceReplay: true,
+        }),
+    ]);
+    assert.equal(resDayA?.game_date, '2026-11-08');
+    assert.equal(resDayB?.game_date, '2026-11-09');
 });
 
 test.after(() => {

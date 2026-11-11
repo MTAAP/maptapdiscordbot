@@ -1,4 +1,3 @@
-import vm from 'vm';
 import { config } from '../config';
 import { getTodayDate } from '../utils/dates';
 import { classifyLocation } from './geography';
@@ -27,6 +26,7 @@ const MONTH_NAMES = [
 const MAPTAP_DAILY_BASE_URL = 'https://maptap.gg/data/this_day_in_history';
 const FETCH_TIMEOUT_MS = 10_000;
 const SYNC_CONCURRENCY = 4;
+const MAX_PARSE_DEPTH = 16;
 
 interface RawMapTapCity {
     id?: string;
@@ -48,41 +48,382 @@ export function isoDateToPlayDay(isoDate: string): string | null {
     return `${MONTH_NAMES[monthIdx]}${dayNum}`;
 }
 
-function executeMapTapDataSnippet(code: string): RawMapTapCity[] | null {
-    const sandbox: Record<string, unknown> = Object.create(null);
-    sandbox.cities = [];
-    sandbox.fiveFromMany = 0;
-    sandbox.topFive = 0;
-    sandbox.theme = '';
-    sandbox.prompt = '';
-    sandbox.wrapWidth = 50;
-    sandbox.arcTheJourney = 0;
-    sandbox.arcList = [];
-    sandbox.arcPoints = [];
-    sandbox.randomAddedText = [];
-    sandbox.randomAddedPoles = [];
-    sandbox.pictureLocations = [];
-    sandbox.secretMessages = [];
-    sandbox.endGameSound = '';
-    sandbox.planetAltitude = 1.45;
-    sandbox.triviaFocus = 1;
-    sandbox.scoreTrack = '';
-    sandbox.firstGame = 0;
-    sandbox.mapURL = '';
-    sandbox.mapTitle = '';
-    sandbox.author = '';
-    sandbox.description = '';
+/**
+ * Static data-only parser for MapTap's `cities = [ { ... }, ... ]` files.
+ * Never executes JavaScript (`vm`, `eval`, or `Function`), eliminating untrusted code execution.
+ */
+class StaticCitiesParser {
+    private pos = 0;
+    private readonly len: number;
 
-    try {
-        vm.runInNewContext(code, sandbox, { timeout: 500 });
-    } catch {
+    constructor(private readonly src: string) {
+        this.len = src.length;
+    }
+
+    private skipWsAndComments(): void {
+        while (this.pos < this.len) {
+            const ch = this.src.charCodeAt(this.pos);
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 0xfeff) {
+                this.pos++;
+                continue;
+            }
+            if (ch === 47 && this.pos + 1 < this.len) {
+                const next = this.src.charCodeAt(this.pos + 1);
+                if (next === 47) {
+                    this.pos += 2;
+                    while (this.pos < this.len && this.src.charCodeAt(this.pos) !== 10) {
+                        this.pos++;
+                    }
+                    continue;
+                }
+                if (next === 42) {
+                    this.pos += 2;
+                    while (this.pos + 1 < this.len) {
+                        if (
+                            this.src.charCodeAt(this.pos) === 42 &&
+                            this.src.charCodeAt(this.pos + 1) === 47
+                        ) {
+                            this.pos += 2;
+                            break;
+                        }
+                        this.pos++;
+                    }
+                    continue;
+                }
+            }
+            break;
+        }
+    }
+
+    private isIdentStart(ch: number): boolean {
+        return (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch === 95 || ch === 36;
+    }
+
+    private isIdentPart(ch: number): boolean {
+        return this.isIdentStart(ch) || (ch >= 48 && ch <= 57);
+    }
+
+    private readIdentifier(): string {
+        const start = this.pos;
+        while (this.pos < this.len && this.isIdentPart(this.src.charCodeAt(this.pos))) {
+            this.pos++;
+        }
+        return this.src.slice(start, this.pos);
+    }
+
+    private readStringLiteral(): string | null {
+        const quote = this.src[this.pos];
+        if (quote !== '"' && quote !== "'" && quote !== '`') return null;
+        this.pos++;
+        let out = '';
+        while (this.pos < this.len) {
+            const ch = this.src[this.pos++];
+            if (ch === quote) {
+                return out;
+            }
+            if (ch === '\\' && this.pos < this.len) {
+                const esc = this.src[this.pos++];
+                if (esc === 'n') out += '\n';
+                else if (esc === 'r') out += '\r';
+                else if (esc === 't') out += '\t';
+                else if (esc === 'u') {
+                    if (this.src[this.pos] === '{') {
+                        const close = this.src.indexOf('}', this.pos + 1);
+                        if (close === -1) return null;
+                        const cp = parseInt(this.src.slice(this.pos + 1, close), 16);
+                        if (Number.isFinite(cp)) out += String.fromCodePoint(cp);
+                        this.pos = close + 1;
+                    } else {
+                        const hex = this.src.slice(this.pos, this.pos + 4);
+                        const cp = parseInt(hex, 16);
+                        if (Number.isFinite(cp)) out += String.fromCharCode(cp);
+                        this.pos += 4;
+                    }
+                } else if (esc === 'x') {
+                    const hex = this.src.slice(this.pos, this.pos + 2);
+                    const cp = parseInt(hex, 16);
+                    if (Number.isFinite(cp)) out += String.fromCharCode(cp);
+                    this.pos += 2;
+                } else {
+                    out += esc;
+                }
+                continue;
+            }
+            if (quote === '`' && ch === '$' && this.src[this.pos] === '{') {
+                // Never evaluate template expressions; drain through closing backtick and return null
+                this.skipBalanced('{', '}');
+                while (this.pos < this.len) {
+                    const rem = this.src[this.pos++];
+                    if (rem === '\\') {
+                        this.pos++;
+                        continue;
+                    }
+                    if (rem === '`') break;
+                }
+                return null;
+            }
+            out += ch;
+        }
         return null;
     }
 
-    if (!Array.isArray(sandbox.cities) || sandbox.cities.length === 0) {
+    private skipBalanced(openChar: string, closeChar: string): void {
+        if (this.src[this.pos] !== openChar) return;
+        this.pos++;
+        let depth = 1;
+        while (this.pos < this.len && depth > 0) {
+            this.skipWsAndComments();
+            if (this.pos >= this.len) break;
+            const c = this.src[this.pos];
+            if (c === '"' || c === "'" || c === '`') {
+                this.skipRawQuoted();
+                continue;
+            }
+            if (c === openChar) depth++;
+            else if (c === closeChar) depth--;
+            this.pos++;
+        }
+    }
+
+    private skipRawQuoted(): void {
+        const q = this.src[this.pos++];
+        while (this.pos < this.len) {
+            const c = this.src[this.pos++];
+            if (c === '\\') {
+                this.pos++;
+                continue;
+            }
+            if (c === q) break;
+        }
+    }
+
+    private skipUnsupportedValue(stopA: string, stopB: string): void {
+        let brace = 0;
+        let bracket = 0;
+        let paren = 0;
+        while (this.pos < this.len) {
+            this.skipWsAndComments();
+            if (this.pos >= this.len) break;
+            const c = this.src[this.pos];
+            if (brace === 0 && bracket === 0 && paren === 0 && (c === stopA || c === stopB)) {
+                return;
+            }
+            if (c === '"' || c === "'" || c === '`') {
+                this.skipRawQuoted();
+                continue;
+            }
+            if (c === '{') brace++;
+            else if (c === '}') brace = Math.max(0, brace - 1);
+            else if (c === '[') bracket++;
+            else if (c === ']') bracket = Math.max(0, bracket - 1);
+            else if (c === '(') paren++;
+            else if (c === ')') paren = Math.max(0, paren - 1);
+            this.pos++;
+        }
+    }
+
+    private parseValue(depth: number, stopA: string, stopB: string): unknown {
+        if (depth > MAX_PARSE_DEPTH) {
+            this.skipUnsupportedValue(stopA, stopB);
+            return undefined;
+        }
+        this.skipWsAndComments();
+        if (this.pos >= this.len) return undefined;
+
+        const c = this.src[this.pos];
+        if (c === '"' || c === "'" || c === '`') {
+            let acc = this.readStringLiteral();
+            if (acc === null) {
+                this.skipUnsupportedValue(stopA, stopB);
+                return undefined;
+            }
+            while (this.pos < this.len) {
+                this.skipWsAndComments();
+                if (this.src[this.pos] !== '+') break;
+                this.pos++;
+                this.skipWsAndComments();
+                const q2 = this.src[this.pos];
+                if (q2 !== '"' && q2 !== "'" && q2 !== '`') {
+                    this.skipUnsupportedValue(stopA, stopB);
+                    return undefined;
+                }
+                const nextPart = this.readStringLiteral();
+                if (nextPart === null) {
+                    this.skipUnsupportedValue(stopA, stopB);
+                    return undefined;
+                }
+                acc += nextPart;
+            }
+            this.skipWsAndComments();
+            const after = this.src[this.pos];
+            if (after && after !== stopA && after !== stopB) {
+                this.skipUnsupportedValue(stopA, stopB);
+                return undefined;
+            }
+            return acc;
+        }
+
+        if (c === '{') {
+            return this.parseObject(depth + 1);
+        }
+
+        if (c === '[') {
+            return this.parseArray(depth + 1);
+        }
+
+        if (c === '-' || c === '+' || c === '.' || (c >= '0' && c <= '9')) {
+            const numMatch = this.src
+                .slice(this.pos)
+                .match(/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/);
+            if (numMatch) {
+                this.pos += numMatch[0].length;
+                this.skipWsAndComments();
+                const after = this.src[this.pos];
+                if (!after || after === stopA || after === stopB) {
+                    const n = Number(numMatch[0]);
+                    return Number.isFinite(n) ? n : undefined;
+                }
+            }
+            this.skipUnsupportedValue(stopA, stopB);
+            return undefined;
+        }
+
+        if (this.isIdentStart(this.src.charCodeAt(this.pos))) {
+            const ident = this.readIdentifier();
+            this.skipWsAndComments();
+            const after = this.src[this.pos];
+            if (!after || after === stopA || after === stopB) {
+                if (ident === 'true') return true;
+                if (ident === 'false') return false;
+                if (ident === 'null') return null;
+                return undefined;
+            }
+        }
+
+        this.skipUnsupportedValue(stopA, stopB);
+        return undefined;
+    }
+
+    private parseObject(depth: number): Record<string, unknown> | null {
+        if (this.src[this.pos] !== '{') return null;
+        this.pos++;
+        const obj: Record<string, unknown> = Object.create(null);
+
+        while (this.pos < this.len) {
+            this.skipWsAndComments();
+            if (this.pos >= this.len) return null;
+            if (this.src[this.pos] === '}') {
+                this.pos++;
+                return obj;
+            }
+            if (this.src[this.pos] === ',') {
+                this.pos++;
+                continue;
+            }
+
+            let key: string | null = null;
+            const ch = this.src[this.pos];
+            if (ch === '"' || ch === "'" || ch === '`') {
+                key = this.readStringLiteral();
+            } else if (this.isIdentStart(this.src.charCodeAt(this.pos))) {
+                key = this.readIdentifier();
+            }
+
+            if (!key) {
+                this.skipUnsupportedValue(',', '}');
+                if (this.src[this.pos] === ',') this.pos++;
+                continue;
+            }
+
+            this.skipWsAndComments();
+            if (this.src[this.pos] !== ':') {
+                this.skipUnsupportedValue(',', '}');
+                if (this.src[this.pos] === ',') this.pos++;
+                continue;
+            }
+            this.pos++;
+
+            const val = this.parseValue(depth, ',', '}');
+            if (val !== undefined) {
+                obj[key] = val;
+            }
+
+            this.skipWsAndComments();
+            if (this.src[this.pos] === ',') {
+                this.pos++;
+            }
+        }
         return null;
     }
-    return sandbox.cities as RawMapTapCity[];
+
+    private parseArray(depth: number): unknown[] | null {
+        if (this.src[this.pos] !== '[') return null;
+        this.pos++;
+        const arr: unknown[] = [];
+
+        while (this.pos < this.len) {
+            this.skipWsAndComments();
+            if (this.pos >= this.len) return null;
+            if (this.src[this.pos] === ']') {
+                this.pos++;
+                return arr;
+            }
+            if (this.src[this.pos] === ',') {
+                this.pos++;
+                continue;
+            }
+            const item = this.parseValue(depth, ',', ']');
+            if (item !== undefined) {
+                arr.push(item);
+            }
+            this.skipWsAndComments();
+            if (this.src[this.pos] === ',') {
+                this.pos++;
+            }
+        }
+        return null;
+    }
+
+    extractCitiesArray(): RawMapTapCity[] | null {
+        while (this.pos < this.len) {
+            this.skipWsAndComments();
+            if (this.pos >= this.len) break;
+
+            const ch = this.src[this.pos];
+            if (ch === '"' || ch === "'" || ch === '`') {
+                this.skipRawQuoted();
+                continue;
+            }
+
+            if (this.isIdentStart(this.src.charCodeAt(this.pos))) {
+                const ident = this.readIdentifier();
+                if (ident === 'cities') {
+                    this.skipWsAndComments();
+                    if (this.src[this.pos] === '=' && this.src[this.pos + 1] !== '=') {
+                        this.pos++;
+                        this.skipWsAndComments();
+                        if (this.src[this.pos] === '[') {
+                            const parsed = this.parseArray(1);
+                            if (Array.isArray(parsed) && parsed.length > 0) {
+                                return parsed.filter(
+                                    (x): x is RawMapTapCity => Boolean(x && typeof x === 'object')
+                                );
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            this.pos++;
+        }
+        return null;
+    }
+}
+
+function parseStaticCitiesSnippet(code: string): RawMapTapCity[] | null {
+    const parser = new StaticCitiesParser(code);
+    return parser.extractCitiesArray();
 }
 
 function extractArchivedYearSnippet(fullScript: string, targetYear: string): string | null {
@@ -94,14 +435,11 @@ function extractArchivedYearSnippet(fullScript: string, targetYear: string): str
     const nextYearMatch = /^\s*\/\/\s*=+\s*\d{4}\s*=+\s*$/m.exec(rest);
     const block = nextYearMatch ? rest.slice(0, nextYearMatch.index) : rest;
 
-    // Uncomment single-line "// " prefixes used in MapTap's archived year sections
-    const uncommented = block
+    return block
         .split(/\r?\n/)
         .map(line => line.replace(/^\s*\/\/\s?/, ''))
         .filter(line => !line.trim().startsWith('*/') && !line.trim().startsWith('/*'))
         .join('\n');
-
-    return uncommented;
 }
 
 function detectExplicitYear(cities: RawMapTapCity[]): string | null {
@@ -120,21 +458,20 @@ export function parseChallengeScript(
     referenceNow: Date = new Date()
 ): DailyChallengeRoundInput[] | null {
     const expectedYear = expectedIsoDate.slice(0, 4);
-    let rawCities = executeMapTapDataSnippet(scriptContent);
+    let rawCities = parseStaticCitiesSnippet(scriptContent);
 
     if (rawCities) {
         const explicitYear = detectExplicitYear(rawCities);
         if (explicitYear && explicitYear !== expectedYear) {
             const archived = extractArchivedYearSnippet(scriptContent, expectedYear);
-            rawCities = archived ? executeMapTapDataSnippet(archived) : null;
+            rawCities = archived ? parseStaticCitiesSnippet(archived) : null;
         } else if (!explicitYear) {
-            // When no explicit year id is present, reject dates >330 days away from referenceNow
             const ageDays =
                 Math.abs(Date.parse(`${expectedIsoDate}T12:00:00Z`) - referenceNow.getTime()) /
                 86_400_000;
             if (ageDays > 330) {
                 const archived = extractArchivedYearSnippet(scriptContent, expectedYear);
-                rawCities = archived ? executeMapTapDataSnippet(archived) : null;
+                rawCities = archived ? parseStaticCitiesSnippet(archived) : null;
             }
         }
     }
@@ -146,7 +483,11 @@ export function parseChallengeScript(
     const rounds: DailyChallengeRoundInput[] = [];
     for (let i = 0; i < 5; i++) {
         const c = rawCities[i];
-        const displayName = (c.correction || c.name || '').trim();
+        const displayName = (
+            (typeof c.correction === 'string' && c.correction) ||
+            (typeof c.name === 'string' && c.name) ||
+            ''
+        ).trim();
         if (!displayName) return null;
 
         const lat = typeof c.lat === 'number' && Number.isFinite(c.lat) ? c.lat : 0;
@@ -156,8 +497,8 @@ export function parseChallengeScript(
             name: displayName,
             lat,
             lng,
-            country: c.country,
-            highlight: c.highlight,
+            country: typeof c.country === 'string' ? c.country : undefined,
+            highlight: typeof c.highlight === 'string' ? c.highlight : undefined,
         });
 
         rounds.push({
