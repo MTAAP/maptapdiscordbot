@@ -174,3 +174,167 @@ export function getRecordsForDate(date: string): RecordInfo[] {
 export function getTodayDate(timezone: string): string {
     return new Date().toLocaleDateString('en-CA', { timeZone: timezone });
 }
+
+// Enhanced statistics
+
+export interface EnhancedStats {
+    totalGames: number;
+    totalPlayers: number;
+    mean: number;
+    median: number;
+    stdDev: number;
+    min: number;
+    max: number;
+}
+
+export interface RoundStats {
+    round: number;
+    mean: number;
+    median: number;
+    stdDev: number;
+    bestScore: number;
+    bestPlayers: Array<{ username: string; score: number; game_date: string }>;
+}
+
+export function getAllScores(): Score[] {
+    const stmt = db.prepare('SELECT * FROM scores ORDER BY score DESC');
+    return stmt.all() as Score[];
+}
+
+export function getEnhancedStats(): EnhancedStats {
+    const scores = getAllScores();
+
+    if (scores.length === 0) {
+        return { totalGames: 0, totalPlayers: 0, mean: 0, median: 0, stdDev: 0, min: 0, max: 0 };
+    }
+
+    const values = scores.map(s => s.score);
+    const uniquePlayers = new Set(scores.map(s => s.user_id)).size;
+
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    const sorted = [...values].sort((a, b) => a - b);
+    const median = sorted.length % 2 === 0
+        ? (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2
+        : sorted[Math.floor(sorted.length / 2)];
+    const variance = values.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / values.length;
+    const stdDev = Math.sqrt(variance);
+
+    return {
+        totalGames: scores.length,
+        totalPlayers: uniquePlayers,
+        mean,
+        median,
+        stdDev,
+        min: sorted[0],
+        max: sorted[sorted.length - 1],
+    };
+}
+
+export function getRoundStats(): RoundStats[] {
+    const scores = getAllScores();
+    const roundStats: RoundStats[] = [];
+
+    for (let round = 0; round < 5; round++) {
+        const roundScores: Array<{ score: number; username: string; game_date: string }> = [];
+
+        for (const s of scores) {
+            if (!s.round_scores) continue;
+            try {
+                const rounds = JSON.parse(s.round_scores) as number[];
+                if (rounds[round] !== undefined) {
+                    roundScores.push({ score: rounds[round], username: s.username, game_date: s.game_date });
+                }
+            } catch {
+                continue;
+            }
+        }
+
+        if (roundScores.length === 0) {
+            roundStats.push({
+                round: round + 1,
+                mean: 0,
+                median: 0,
+                stdDev: 0,
+                bestScore: 0,
+                bestPlayers: [],
+            });
+            continue;
+        }
+
+        const values = roundScores.map(r => r.score);
+        const mean = values.reduce((a, b) => a + b, 0) / values.length;
+        const sorted = [...values].sort((a, b) => a - b);
+        const median = sorted.length % 2 === 0
+            ? (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2
+            : sorted[Math.floor(sorted.length / 2)];
+        const variance = values.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / values.length;
+        const stdDev = Math.sqrt(variance);
+
+        const bestScore = Math.max(...values);
+        const bestPlayers = roundScores
+            .filter(r => r.score === bestScore)
+            .slice(0, 3)
+            .map(r => ({ username: r.username, score: r.score, game_date: r.game_date }));
+
+        roundStats.push({
+            round: round + 1,
+            mean,
+            median,
+            stdDev,
+            bestScore,
+            bestPlayers,
+        });
+    }
+
+    return roundStats;
+}
+
+export function getUserEnhancedStats(userId: string): (EnhancedStats & { roundAverages: number[] }) | null {
+    const stmt = db.prepare('SELECT * FROM scores WHERE user_id = ? ORDER BY score DESC');
+    const scores = stmt.all(userId) as Score[];
+
+    if (scores.length === 0) {
+        return null;
+    }
+
+    const values = scores.map(s => s.score);
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    const sorted = [...values].sort((a, b) => a - b);
+    const median = sorted.length % 2 === 0
+        ? (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2
+        : sorted[Math.floor(sorted.length / 2)];
+    const variance = values.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / values.length;
+    const stdDev = Math.sqrt(variance);
+
+    // Calculate round averages
+    const roundTotals = [0, 0, 0, 0, 0];
+    const roundCounts = [0, 0, 0, 0, 0];
+
+    for (const s of scores) {
+        if (!s.round_scores) continue;
+        try {
+            const rounds = JSON.parse(s.round_scores) as number[];
+            for (let i = 0; i < 5; i++) {
+                if (rounds[i] !== undefined) {
+                    roundTotals[i] += rounds[i];
+                    roundCounts[i]++;
+                }
+            }
+        } catch {
+            continue;
+        }
+    }
+
+    const roundAverages = roundTotals.map((total, i) => roundCounts[i] > 0 ? total / roundCounts[i] : 0);
+
+    return {
+        totalGames: scores.length,
+        totalPlayers: 1,
+        mean,
+        median,
+        stdDev,
+        min: sorted[0],
+        max: sorted[sorted.length - 1],
+        roundAverages,
+    };
+}

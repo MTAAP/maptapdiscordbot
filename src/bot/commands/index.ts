@@ -9,6 +9,9 @@ import { handleLeaderboard } from './leaderboard';
 import { handleStats } from './stats';
 import { handleRecords } from './records';
 import { handleDelta } from './delta';
+import { handleImport } from './import';
+import { handleFullStats } from './fullstats';
+import { handleWorst } from './worst';
 
 type CommandHandler = (interaction: ChatInputCommandInteraction) => Promise<void>;
 
@@ -18,6 +21,9 @@ const commands: Map<string, CommandHandler> = new Map([
     ['stats', handleStats],
     ['records', handleRecords],
     ['delta', handleDelta],
+    ['import', handleImport],
+    ['fullstats', handleFullStats],
+    ['worst', handleWorst],
 ]);
 
 export async function handleInteraction(interaction: Interaction): Promise<void> {
@@ -75,6 +81,18 @@ export function getCommandData(): RESTPostAPIChatInputApplicationCommandsJSONBod
         .addSubcommand(sub =>
             sub.setName('delta')
                 .setDescription('Show biggest deltas (score vs daily average)')
+        )
+        .addSubcommand(sub =>
+            sub.setName('import')
+                .setDescription('Import historical scores from channel (admin only)')
+        )
+        .addSubcommand(sub =>
+            sub.setName('fullstats')
+                .setDescription('Show full statistics with mean, median, std dev, and per-round stats')
+        )
+        .addSubcommand(sub =>
+            sub.setName('worst')
+                .setDescription('Show the worst scores ever recorded')
         );
 
     return [maptapCommand.toJSON()];

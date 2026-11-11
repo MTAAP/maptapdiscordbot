@@ -28,10 +28,11 @@ export function parseMapTapMessage(content: string): ParsedMapTapScore | null {
     }
     const finalScore = parseInt(scoreMatch[1], 10);
 
-    // Extract round scores (numbers followed by emojis)
-    // Handles: 🏅🏆🔥😔😢😭🎯 and potentially others
+    // Extract round scores (numbers followed by any emoji)
+    // Match numbers followed by emoji - uses Unicode emoji range
     const roundScores: number[] = [];
-    const roundPattern = /(\d+)\s*[🏅🏆🔥😔😢😭🎯⭐💯🥇🥈🥉]/g;
+    // This pattern matches digits followed by any emoji (using Unicode property)
+    const roundPattern = /(\d+)\s*[\u{1F300}-\u{1F9FF}]/gu;
     let match;
     while ((match = roundPattern.exec(content)) !== null) {
         roundScores.push(parseInt(match[1], 10));
