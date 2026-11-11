@@ -4,7 +4,12 @@ import { checkpointDatabase, db, initializeDatabase } from './database';
 import { startBot } from './bot/client';
 import { syncGuildCommands } from './deploy-commands';
 import { backfillIfDatabaseEmpty } from './services/channelImport';
-import { startDailyScheduler, startWeeklyScheduler } from './services/scheduler';
+import { syncMissingChallenges } from './services/challengeSync';
+import {
+    startDailyScheduler,
+    startLlmPlayerScheduler,
+    startWeeklyScheduler,
+} from './services/scheduler';
 
 const HEARTBEAT_FILE = '/tmp/mappy-heartbeat';
 
@@ -32,9 +37,16 @@ async function main(): Promise<void> {
     heartbeatTimer.unref();
 
     await backfillIfDatabaseEmpty(client);
+    const challengeSync = await syncMissingChallenges();
+    if (challengeSync.attempted > 0) {
+        console.log(
+            `Daily challenge sync complete: synced=${challengeSync.synced}/${challengeSync.attempted} day(s)`
+        );
+    }
 
     startDailyScheduler(client);
     startWeeklyScheduler(client);
+    startLlmPlayerScheduler();
 
     let shuttingDown = false;
     const shutdown = () => {

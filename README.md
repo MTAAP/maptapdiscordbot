@@ -4,21 +4,26 @@ A Discord bot that tracks MapTap geography game scores, posts daily and weekly s
 
 ## Features
 
-- **Automatic Score Detection**: Monitors a channel for MapTap score messages starting with `www.maptap.gg` (`0` to `1,000` points across up to 5 rounds)
+- **Automatic Score Detection**: Monitors a channel for MapTap score messages (`www.maptap.gg`, `https://maptap.gg`, or `MapTap <Month> <Day>`, including flag-prefixed round scores)
 - **Daily and Weekly Summaries**: Automated daily recap at `SUMMARY_HOUR:00` and Monday weekly recap at `SUMMARY_HOUR:05` in `TIMEZONE`
+- **Regional Standings and Passports**: Syncs daily challenge locations from `maptap.gg` and ranks players by UN M49 continent, subregion, and country
+- **Daily `local-smart` Challenger**: Optional headless Chromium player that navigates `maptap.gg/?letmeplay=1` using only screenshots and keyboard controls (`WASD`, `QE`, `Shift`, `Space`), posts a spoiler-free daytime benchmark, and attaches an animated replay GIF to the midnight recap
 - **All-Time Leaderboards**: Best averages, highest scores, worst scores, per-round breakdowns, and biggest daily deltas
 - **Record Tracking**: Announces when all-time high scores are broken
 
 ## Commands
 
-- `/maptap daily`: Show today's statistics
+- `/maptap daily`: Show today's statistics and spoiler-free `local-smart` benchmark
 - `/maptap weekly`: Show the current Monday-to-Sunday standings
 - `/maptap leaderboard`: Show the all-time leaderboard
 - `/maptap records`: Show top 10 all-time scores
 - `/maptap worst`: Show the 10 lowest scores recorded
 - `/maptap allplayers`: Show all players ranked by average score
 - `/maptap fullstats`: Show mean, median, standard deviation, and per-round stats
-- `/maptap stats [@user]`: Show stats for a user (defaults to you)
+- `/maptap stats [@user]`: Show stats and geography snapshot for a user (defaults to you)
+- `/maptap region [area] [min_rounds]`: Show World Crowns or standings for a continent, subregion, or country
+- `/maptap passport [@user]`: Show a user's strongest subregions, blind spots, and best countries
+- `/maptap llm [date]`: Show human vs. `local-smart` head-to-head records, or reveal a completed past date's round monologues and replay GIF
 - `/maptap delta`: Show biggest deltas (score vs daily average)
 - `/maptap import`: Backfill historical scores from channel history since 2024-01-01 (Administrator only)
 
@@ -53,6 +58,9 @@ CHANNEL_ID=channel_to_monitor
 TIMEZONE=Europe/Amsterdam
 SUMMARY_HOUR=0
 DATABASE_PATH=./maptap.db
+# Optional: SVPG Inference Gateway key for the daily headless Chromium local-smart player
+# SVPG_API_KEY=your_svpg_gateway_key
+# LLM_REASONING_EFFORT=low
 ```
 
 To find Discord IDs:
@@ -111,8 +119,10 @@ When a valid score is detected, the bot:
 ## Database
 
 SQLite database stored at `DATABASE_PATH` (`./maptap.db` locally, `/data/maptap.db` in Docker):
-- `scores`: Individual daily game scores
+- `scores`: Individual human daily game scores
 - `records`: All-time record-breaking achievements
+- `daily_challenges`: Synced 5-round daily challenge locations and ISO/UN M49 geography tags
+- `llm_daily_runs`: Separate `local-smart` daily runs, round monologues, token counts, and replay GIF paths (`replays/<YYYY-MM-DD>.gif`, 30-day retention)
 - `meta`: Operational state markers (`initial_backfill_complete`)
 
 ## License

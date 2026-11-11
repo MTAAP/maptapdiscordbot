@@ -5,6 +5,7 @@ import {
     importChannelHistory,
     isImportInProgress,
 } from '../../services/channelImport';
+import { syncMissingChallenges } from '../../services/challengeSync';
 
 export async function handleImport(interaction: ChatInputCommandInteraction): Promise<void> {
     if (!interaction.memberPermissions?.has('Administrator')) {
@@ -41,12 +42,15 @@ export async function handleImport(interaction: ChatInputCommandInteraction): Pr
             },
         });
 
+        const challengeSync = await syncMissingChallenges();
+
         await interaction
             .editReply(
                 `✅ Import complete!\n` +
                     `• Messages scanned: **${latest.totalProcessed}**\n` +
                     `• Scores imported: **${latest.imported}**\n` +
-                    `• Duplicates skipped: **${latest.skipped}**`
+                    `• Duplicates skipped: **${latest.skipped}**\n` +
+                    `• Challenge days newly synced: **${challengeSync.synced}**`
             )
             .catch(err => {
                 console.warn('Failed to edit final import reply:', err);

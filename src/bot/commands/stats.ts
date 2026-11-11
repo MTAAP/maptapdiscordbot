@@ -1,6 +1,6 @@
 import { ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
-import { getUserEnhancedStats } from '../../database/queries';
-import { formatNumber, formatAverage } from '../../utils/embeds';
+import { getUserEnhancedStats, getUserPassport } from '../../database/queries';
+import { formatNumber, formatAverage, formatSignedDelta } from '../../utils/embeds';
 
 export async function handleStats(interaction: ChatInputCommandInteraction): Promise<void> {
     const targetUser = interaction.options.getUser('user') || interaction.user;
@@ -36,6 +36,24 @@ export async function handleStats(interaction: ChatInputCommandInteraction): Pro
         embed.addFields({
             name: '🎯 Round Averages',
             value: roundText,
+        });
+    }
+
+    const passport = getUserPassport(targetUser.id);
+    if (passport && passport.strongestSubregions.length > 0) {
+        const best = passport.strongestSubregions[0];
+        const worst = passport.weakestSubregions[0];
+        const lines = [
+            `💪 **Best:** ${best.label} — **${formatAverage(best.meanAccuracy)}** (${formatSignedDelta(best.meanDelta)} vs lobby, ${best.rounds} rds)`,
+        ];
+        if (worst && worst.label !== best.label) {
+            lines.push(
+                `🧭 **Blind Spot:** ${worst.label} — **${formatAverage(worst.meanAccuracy)}** (${formatSignedDelta(worst.meanDelta)} vs lobby, ${worst.rounds} rds)`
+            );
+        }
+        embed.addFields({
+            name: '🌍 Geography Snapshot (full: /maptap passport)',
+            value: lines.join('\n'),
         });
     }
 
