@@ -20,6 +20,6 @@ export const config = {
     timezone: process.env.TIMEZONE || 'Europe/Amsterdam',
     summaryHour: parseInt(process.env.SUMMARY_HOUR || '0', 10),
     database: {
-        path: './maptap.db',
+        path: process.env.DATABASE_PATH || './maptap.db',
     },
 };

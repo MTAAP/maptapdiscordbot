@@ -71,33 +71,11 @@ npm run build
 npm start
 ```
 
-## Mac Deployment (Auto-start on boot)
+## Deployment
 
-1. Build the project:
-   ```bash
-   npm run build
-   ```
+Pushes to `master` run `.github/workflows/build-and-deploy.yml` on the `mtaap` self-hosted runners. After typechecking and building in `ci.yml`, the workflow publishes `ghcr.io/mtaap/maptapdiscordbot:master` and triggers a stop-then-start deployment on Coolify (`free-fsn1-01`).
 
-2. Copy the launchd plist:
-   ```bash
-   cp com.mappy.bot.plist ~/Library/LaunchAgents/
-   ```
-
-3. Load the service:
-   ```bash
-   launchctl load ~/Library/LaunchAgents/com.mappy.bot.plist
-   ```
-
-4. Check status:
-   ```bash
-   launchctl list | grep mappy
-   tail -f logs/mappy.log
-   ```
-
-5. To stop:
-   ```bash
-   launchctl unload ~/Library/LaunchAgents/com.mappy.bot.plist
-   ```
+Runtime configuration comes from Infisical EU (`maptapdiscordbot`, environment `prod`, folder `/app`), and SQLite persists on the `/data` volume (`DATABASE_PATH=/data/maptap.db`). On startup the bot registers guild slash commands and backfills channel score history if the database is empty.
 
 ## Score Format
 

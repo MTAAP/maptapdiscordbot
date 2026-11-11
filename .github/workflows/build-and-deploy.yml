@@ -1,0 +1,149 @@
+# Adapted from the SVPG/MTAAP Coolify build-and-deploy workflow.
+# Pull requests from this repository build the image only; fork PRs never run on shared self-hosted runners.
+# Pushes to master run CI and the Docker build in parallel, push :sha-<sha>, promote :master after both pass,
+# and trigger Coolify when vars.DEPLOY_ENABLED is "true".
+name: build-and-deploy
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-and-deploy-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  build-pr:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ vars.RUNNER }}
+    permissions:
+      contents: read
+    steps:
+      - name: Clear root-owned workspace files
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE":/w node:24-bookworm-slim sh -c 'find /w -mindepth 1 -delete'
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: maptapdiscordbot:pr-${{ github.sha }}
+          provenance: false
+      - name: Smoke-test image runtime
+        run: docker run --rm --entrypoint node "maptapdiscordbot:pr-${{ github.sha }}" -e "require('better-sqlite3')"
+
+  build:
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ vars.RUNNER }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - run: echo "DOCKER_CONFIG=$RUNNER_TEMP/docker-config-$GITHUB_RUN_ID-build" >> "$GITHUB_ENV"
+      - name: Clear root-owned workspace files
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE":/w node:24-bookworm-slim sh -c 'find /w -mindepth 1 -delete'
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.ref == 'refs/heads/master' }}
+          tags: ${{ vars.IMAGE_NAME }}:sha-${{ github.sha }}
+          provenance: false
+      - name: Record digest
+        if: github.ref == 'refs/heads/master'
+        run: echo "image ${{ vars.IMAGE_NAME }}:sha-${{ github.sha }} = ${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    needs: [verify, build]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    runs-on: ${{ vars.RUNNER }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - id: head
+        name: Check master is still at this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          master_sha=$(curl -fsS --connect-timeout 10 --max-time 30 -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/commits/refs/heads/master" | jq -r .sha)
+          [ -n "$master_sha" ] && [ "$master_sha" != null ] || { echo "Could not read the head of master"; exit 1; }
+          if [ "$master_sha" != "$GITHUB_SHA" ]; then
+            echo "Skipping deploy: refs/heads/master has advanced to $master_sha (this run is $GITHUB_SHA)"
+            echo "current=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.head.outputs.current == 'true'
+        run: echo "DOCKER_CONFIG=$RUNNER_TEMP/docker-config-$GITHUB_RUN_ID-deploy" >> "$GITHUB_ENV"
+      - if: steps.head.outputs.current == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - if: steps.head.outputs.current == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote verified image to :master
+        if: steps.head.outputs.current == 'true'
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create -t "${{ vars.IMAGE_NAME }}:master" "${{ vars.IMAGE_NAME }}:sha-${{ github.sha }}"
+      - name: Deploy on Coolify
+        if: steps.head.outputs.current == 'true' && vars.DEPLOY_ENABLED == 'true'
+        env:
+          TOKEN: ${{ secrets.COOLIFY_DEPLOY_TOKEN }}
+          UUIDS: ${{ vars.COOLIFY_UUIDS }}
+        run: |
+          set -euo pipefail
+          resp=$(curl -fsS --connect-timeout 10 --max-time 60 -X POST -H "Authorization: Bearer $TOKEN" \
+            "https://coolify.svpg.dev/api/v1/deploy?uuid=${UUIDS}&force=false")
+          echo "$resp" | jq -r '.deployments[] | "\(.resource_uuid) \(.deployment_uuid)"'
+          for uuid in ${UUIDS//,/ }; do
+            echo "$resp" | jq -e --arg u "$uuid" 'any(.deployments[]; .resource_uuid == $u and (.deployment_uuid // "") != "")' >/dev/null \
+              || { echo "$uuid did not start a deployment"; exit 1; }
+          done
+          for dep in $(echo "$resp" | jq -r '.deployments[].deployment_uuid'); do
+            for _ in $(seq 1 60); do
+              status=$(curl -fsS --connect-timeout 10 --max-time 60 -H "Authorization: Bearer $TOKEN" \
+                "https://coolify.svpg.dev/api/v1/deployments/$dep" | jq -r .status)
+              case "$status" in
+                finished) echo "$dep finished"; break ;;
+                failed|cancelled*) echo "$dep $status"; exit 1 ;;
+              esac
+              sleep 10
+            done
+            [ "$status" = finished ] || { echo "$dep timed out ($status)"; exit 1; }
+          done

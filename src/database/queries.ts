@@ -67,6 +67,11 @@ export function getScoresForDate(date: string): Score[] {
     return stmt.all(date) as Score[];
 }
 
+export function getScoreCount(): number {
+    const row = db.prepare('SELECT COUNT(*) as count FROM scores').get() as { count: number };
+    return row.count;
+}
+
 export function getDailyStats(date: string): DailyStats {
     const scores = getScoresForDate(date);
 

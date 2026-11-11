@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-check:
+    name: Typecheck and build
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Linux, X64, mtaap]
+    timeout-minutes: 15
+    container:
+      image: node:24-bookworm-slim
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Install native build tools
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends python3 make g++ >/dev/null
+      - name: Install, build, and smoke-check SQLite binding
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          node -e "const Database = require('better-sqlite3'); const db = new Database(':memory:'); db.exec('SELECT 1'); db.close();"

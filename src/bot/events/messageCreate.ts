@@ -14,7 +14,7 @@ export async function handleMessage(message: Message): Promise<void> {
     const parsed = parseMapTapMessage(message.content);
     if (!parsed) return;
 
-    const normalizedDate = normalizeGameDate(parsed.gameDate, config.timezone);
+    const normalizedDate = normalizeGameDate(parsed.gameDate, config.timezone, message.createdAt);
 
     // Check current record before inserting
     const currentRecord = getCurrentTopScore();
