@@ -13,6 +13,7 @@ import { handleImport } from './import';
 import { handleFullStats } from './fullstats';
 import { handleWorst } from './worst';
 import { handleAllPlayers } from './allplayers';
+import { handleWeekly } from './weekly';
 
 type CommandHandler = (interaction: ChatInputCommandInteraction) => Promise<void>;
 
@@ -26,6 +27,7 @@ const commands: Map<string, CommandHandler> = new Map([
     ['fullstats', handleFullStats],
     ['worst', handleWorst],
     ['allplayers', handleAllPlayers],
+    ['weekly', handleWeekly],
 ]);
 
 export async function handleInteraction(interaction: Interaction): Promise<void> {
@@ -99,6 +101,10 @@ export function getCommandData(): RESTPostAPIChatInputApplicationCommandsJSONBod
         .addSubcommand(sub =>
             sub.setName('allplayers')
                 .setDescription('Show all players ranked by average score')
+        )
+        .addSubcommand(sub =>
+            sub.setName('weekly')
+                .setDescription('Show current week\'s progress and standings')
         );
 
     return [maptapCommand.toJSON()];
