@@ -176,18 +176,17 @@ export function createWeeklySummaryEmbed(stats: WeeklyStats): EmbedBuilder {
         value: `• Total Games: **${stats.totalGames}**\n• Players: **${stats.totalPlayers}**\n• Weekly Average: **${formatAverage(stats.overallAverage)}** pts`,
     });
 
-    // Player rankings (top 5)
+    // Player rankings (all participants)
     const medals = ['🥇', '🥈', '🥉'];
-    const topPlayers = stats.playerStats.slice(0, 5);
-    if (topPlayers.length > 0) {
-        const rankingsText = topPlayers
+    if (stats.playerStats.length > 0) {
+        const rankingsText = stats.playerStats
             .map((p, i) => {
                 const prefix = i < 3 ? medals[i] : `**${i + 1}.**`;
                 return `${prefix} ${p.username} - **${formatAverage(p.average)}** avg (${p.games} games)`;
             })
             .join('\n');
         embed.addFields({
-            name: '🏆 Top Players This Week',
+            name: '🏆 Player Rankings',
             value: rankingsText,
         });
     }
