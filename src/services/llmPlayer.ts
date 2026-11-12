@@ -434,8 +434,13 @@ async function spawnIsolatedChromeOnce(
     profileDir: string,
     timezone: string,
     useSwiftShader: boolean,
-    disableOsSandbox: boolean
+    disableOsSandbox: boolean,
+    session: ActiveBrowserSession
 ): Promise<{ proc: ChildProcess; cdp: CDPClient }> {
+    if (session.abortController.signal.aborted || playerShuttingDown) {
+        throw new Error('LLM player shutting down before browser launch');
+    }
+
     const isLinux = process.platform === 'linux';
     const args = [
         '--headless=new',
@@ -459,39 +464,60 @@ async function spawnIsolatedChromeOnce(
     ];
 
     const proc = spawn(chromeBin, args, {
+        detached: process.platform !== 'win32',
         stdio: ['ignore', 'pipe', 'pipe'],
         env: buildSanitizedBrowserEnv(timezone, profileDir),
     });
+    session.proc = proc;
+    session.cdp = null;
 
     let cdp: CDPClient | null = null;
     try {
         const wsBrowserUrl = await new Promise<string>((resolve, reject) => {
             let stderr = '';
-            const timer = setTimeout(
-                () => reject(new Error(`Timed out waiting for Chromium DevTools: ${stderr.slice(-400)}`)),
-                20_000
-            );
+            const cleanupAbort = () => {
+                session.abortController.signal.removeEventListener('abort', onAbort);
+            };
+            const onAbort = () => {
+                clearTimeout(timer);
+                cleanupAbort();
+                reject(new Error('LLM player aborted while waiting for Chromium DevTools'));
+            };
+            const timer = setTimeout(() => {
+                cleanupAbort();
+                reject(new Error(`Timed out waiting for Chromium DevTools: ${stderr.slice(-400)}`));
+            }, 20_000);
+
+            if (session.abortController.signal.aborted) {
+                onAbort();
+                return;
+            }
+            session.abortController.signal.addEventListener('abort', onAbort, { once: true });
+
             proc.stderr?.on('data', (chunk: Buffer) => {
                 stderr += chunk.toString();
                 const m = stderr.match(/DevTools listening on (ws:\/\/[^\s]+)/);
                 if (m) {
                     clearTimeout(timer);
+                    cleanupAbort();
                     resolve(m[1]);
                 }
             });
             proc.once('error', err => {
                 clearTimeout(timer);
+                cleanupAbort();
                 reject(err);
             });
             proc.once('exit', code => {
                 clearTimeout(timer);
+                cleanupAbort();
                 reject(new Error(`Chromium exited early (code=${code}): ${stderr.slice(-400)}`));
             });
         });
 
         const port = new URL(wsBrowserUrl).port;
         const targetsRes = await fetch(`http://127.0.0.1:${port}/json/list`, {
-            signal: AbortSignal.timeout(10_000),
+            signal: AbortSignal.any([AbortSignal.timeout(10_000), session.abortController.signal]),
         });
         const targets = (await targetsRes.json()) as Array<{ type: string; webSocketDebuggerUrl?: string }>;
         const pageTarget = targets.find(t => t.type === 'page' && t.webSocketDebuggerUrl);
@@ -500,7 +526,11 @@ async function spawnIsolatedChromeOnce(
         }
 
         cdp = new CDPClient(pageTarget.webSocketDebuggerUrl);
+        session.cdp = cdp;
         await cdp.connect();
+        if (session.abortController.signal.aborted || playerShuttingDown) {
+            throw new Error('LLM player aborted during CDP setup');
+        }
         await cdp.send('Page.enable');
         await cdp.send('Runtime.enable');
         await cdp.send('Emulation.setDeviceMetricsOverride', {
@@ -514,6 +544,8 @@ async function spawnIsolatedChromeOnce(
         return { proc, cdp };
     } catch (error) {
         await terminateChromeProcess(proc, cdp);
+        if (session.proc === proc) session.proc = null;
+        if (session.cdp === cdp) session.cdp = null;
         throw error;
     }
 }
@@ -522,11 +554,15 @@ async function launchIsolatedChrome(
     chromeBin: string,
     profileDir: string,
     timezone: string,
-    useSwiftShader: boolean
+    useSwiftShader: boolean,
+    session: ActiveBrowserSession
 ): Promise<{ proc: ChildProcess; cdp: CDPClient }> {
     try {
-        return await spawnIsolatedChromeOnce(chromeBin, profileDir, timezone, useSwiftShader, false);
+        return await spawnIsolatedChromeOnce(chromeBin, profileDir, timezone, useSwiftShader, false, session);
     } catch (firstErr) {
+        if (session.abortController.signal.aborted || playerShuttingDown) {
+            throw firstErr;
+        }
         const msg = firstErr instanceof Error ? firstErr.message : String(firstErr);
         const isContainerNamespaceDenial =
             isRunningInsideLinuxContainer() &&
@@ -540,36 +576,48 @@ async function launchIsolatedChrome(
         console.warn(
             '[LLM Player] Container seccomp blocked nested Chromium namespaces; falling back to container-isolated headless mode'
         );
-        return spawnIsolatedChromeOnce(chromeBin, profileDir, timezone, useSwiftShader, true);
+        return spawnIsolatedChromeOnce(chromeBin, profileDir, timezone, useSwiftShader, true, session);
     }
 }
 
 async function terminateChromeProcess(proc: ChildProcess | null, cdp: CDPClient | null): Promise<void> {
     cdp?.close();
-    if (!proc || proc.exitCode !== null) return;
+    if (!proc) return;
 
-    try {
-        proc.kill('SIGTERM');
-    } catch {
-        return;
-    }
-
-    await Promise.race([
-        new Promise<void>(resolve => proc.once('exit', () => resolve())),
-        sleep(2000),
-    ]);
+    const signalProcessTree = (sig: NodeJS.Signals) => {
+        if (process.platform !== 'win32' && proc.pid) {
+            try {
+                process.kill(-proc.pid, sig);
+                return;
+            } catch {
+                // fall back to direct child kill
+            }
+        }
+        try {
+            proc.kill(sig);
+        } catch {
+            // already exited
+        }
+    };
 
     if (proc.exitCode === null) {
-        try {
-            proc.kill('SIGKILL');
-        } catch {
-            // ignore already exited
-        }
+        signalProcessTree('SIGTERM');
+        await Promise.race([
+            new Promise<void>(resolve => proc.once('exit', () => resolve())),
+            sleep(2000),
+        ]);
+    }
+
+    if (proc.exitCode === null) {
+        signalProcessTree('SIGKILL');
         await Promise.race([
             new Promise<void>(resolve => proc.once('exit', () => resolve())),
             sleep(500),
         ]);
     }
+
+    proc.stdout?.destroy();
+    proc.stderr?.destroy();
 }
 
 const KEY_INFO: Record<string, string> = {
@@ -755,12 +803,22 @@ interface VisibleRoundHud {
  * Blind-hands boundary: reads ONLY round readiness and visible HUD strings.
  * Never reads window.cities, runtime.activeRoundCity.lat/lng, or myGlobe.pointOfView().
  */
-async function waitForRoundReady(cdp: CDPClient, targetRound: number): Promise<VisibleRoundHud> {
+async function waitForRoundReady(
+    cdp: CDPClient,
+    targetRound: number,
+    abortSignal?: AbortSignal
+): Promise<VisibleRoundHud> {
     let prevInstruction = '';
     let stableCount = 0;
 
     for (let i = 0; i < 120; i++) {
+        if (abortSignal?.aborted) {
+            throw new Error(`Aborted waiting for MapTap Round ${targetRound}`);
+        }
         await sleep(250);
+        if (abortSignal?.aborted) {
+            throw new Error(`Aborted waiting for MapTap Round ${targetRound}`);
+        }
         const evalRes = await cdp.send<{ result: { value?: VisibleRoundHud } }>('Runtime.evaluate', {
             expression: `(() => {
                 const ready = typeof gameState !== 'undefined'
@@ -960,13 +1018,16 @@ export async function shutdownLlmPlayer(): Promise<void> {
     if (active) {
         active.abortController.abort();
         await terminateChromeProcess(active.proc, active.cdp);
+    }
+    await Promise.race([browserSerialQueue.catch(() => null), sleep(3000)]);
+    if (active) {
+        await terminateChromeProcess(active.proc, active.cdp);
         try {
             fs.rmSync(active.profileDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 150 });
         } catch {
             // ignore temp cleanup error
         }
     }
-    await Promise.race([browserSerialQueue.catch(() => null), sleep(3000)]);
 }
 
 export async function runLlmDailyChallenge(
@@ -1042,10 +1103,9 @@ export async function runLlmDailyChallenge(
                 chromeBin,
                 profileDir,
                 timezone,
-                preferSwiftShaderOnBoot
+                preferSwiftShaderOnBoot,
+                session
             );
-            session.proc = launched.proc;
-            session.cdp = launched.cdp;
             let cdp = launched.cdp;
 
             const bootstrapStorageScript = `
@@ -1060,7 +1120,7 @@ export async function runLlmDailyChallenge(
             let r1Hud: VisibleRoundHud | null = null;
             let hasValidCanvas = false;
             try {
-                r1Hud = await waitForRoundReady(cdp, 1);
+                r1Hud = await waitForRoundReady(cdp, 1, abortController.signal);
                 const canvasCheck = await cdp.send<{ result: { value?: boolean } }>(
                     'Runtime.evaluate',
                     {
@@ -1076,18 +1136,16 @@ export async function runLlmDailyChallenge(
                 hasValidCanvas = false;
             }
 
-            if (!hasValidCanvas && !preferSwiftShaderOnBoot) {
+            if (!hasValidCanvas && !preferSwiftShaderOnBoot && !abortController.signal.aborted && !playerShuttingDown) {
                 console.log('[LLM Player] Retrying headless Chromium with Angle SwiftShader WebGL...');
                 await terminateChromeProcess(session.proc, session.cdp);
-                const fallback = await launchIsolatedChrome(chromeBin, profileDir, timezone, true);
-                session.proc = fallback.proc;
-                session.cdp = fallback.cdp;
+                const fallback = await launchIsolatedChrome(chromeBin, profileDir, timezone, true, session);
                 cdp = fallback.cdp;
                 await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
                     source: bootstrapStorageScript,
                 });
                 await cdp.send('Page.navigate', { url: maptapUrl });
-                r1Hud = await waitForRoundReady(cdp, 1);
+                r1Hud = await waitForRoundReady(cdp, 1, abortController.signal);
             }
 
             if (!r1Hud) {
@@ -1108,7 +1166,8 @@ export async function runLlmDailyChallenge(
             let totalReasoningTokens = 0;
 
             for (let round = 1; round <= 5; round++) {
-                const roundHud = round === 1 ? r1Hud : await waitForRoundReady(cdp, round);
+                const roundHud =
+                    round === 1 ? r1Hud : await waitForRoundReady(cdp, round, abortController.signal);
                 if (roundHud.puzzleTitle) puzzleTitle = roundHud.puzzleTitle;
                 const multiplier = getMultiplierForRound(round);
 

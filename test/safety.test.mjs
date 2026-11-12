@@ -872,6 +872,39 @@ test('Phase 2: llm_daily_runs keeps human scores pure, computes W-L rivalry, and
     ]);
     assert.equal(resDayA?.game_date, '2026-11-08');
     assert.equal(resDayB?.game_date, '2026-11-09');
+
+    // Mid-launch shutdownLlmPlayer() must immediately abort and terminate a spawned child process
+    const slowChromeScript = path.join(tmpDir, 'slow-chrome-stub.sh');
+    const pidFile = path.join(tmpDir, 'slow-chrome.pid');
+    fs.writeFileSync(
+        slowChromeScript,
+        `#!/bin/sh\necho $$ > "${pidFile}"\nsleep 30\n`,
+        { mode: 0o755 }
+    );
+    const launchRunPromise = llmPlayerMod.runLlmDailyChallenge('2026-11-07', {
+        apiKey: 'dummy',
+        chromePath: slowChromeScript,
+        forceReplay: true,
+    });
+    for (let i = 0; i < 40 && !fs.existsSync(pidFile); i++) {
+        await new Promise(r => setTimeout(r, 25));
+    }
+    assert.ok(fs.existsSync(pidFile), 'Stub Chromium process should have spawned');
+    const childPid = Number(fs.readFileSync(pidFile, 'utf8').trim());
+    assert.ok(childPid > 0);
+
+    const shutdownStart = Date.now();
+    await llmPlayerMod.shutdownLlmPlayer();
+    await launchRunPromise;
+    assert.ok(Date.now() - shutdownStart < 2500, 'shutdownLlmPlayer must abort mid-launch promptly');
+
+    let childStillAlive = true;
+    try {
+        process.kill(childPid, 0);
+    } catch {
+        childStillAlive = false;
+    }
+    assert.equal(childStillAlive, false, 'Spawned Chromium child must be terminated by shutdownLlmPlayer');
 });
 
 test.after(() => {
