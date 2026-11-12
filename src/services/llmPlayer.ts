@@ -457,7 +457,7 @@ async function spawnIsolatedChromeOnce(
         '--site-per-process',
         '--enable-webgl',
         '--ignore-gpu-blocklist',
-        ...(isLinux ? ['--disable-dev-shm-usage'] : []),
+        ...(isLinux ? ['--disable-dev-shm-usage', '--disable-crash-reporter'] : []),
         ...(disableOsSandbox ? ['--no-sandbox', '--disable-setuid-sandbox'] : []),
         ...(useSwiftShader ? ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] : []),
         'about:blank',
@@ -485,7 +485,7 @@ async function spawnIsolatedChromeOnce(
             };
             const timer = setTimeout(() => {
                 cleanupAbort();
-                reject(new Error(`Timed out waiting for Chromium DevTools: ${stderr.slice(-400)}`));
+                reject(new Error(`Timed out waiting for Chromium DevTools: ${stderr.slice(-2000)}`));
             }, 20_000);
 
             if (session.abortController.signal.aborted) {
@@ -511,7 +511,7 @@ async function spawnIsolatedChromeOnce(
             proc.once('exit', code => {
                 clearTimeout(timer);
                 cleanupAbort();
-                reject(new Error(`Chromium exited early (code=${code}): ${stderr.slice(-400)}`));
+                reject(new Error(`Chromium exited early (code=${code}): ${stderr.slice(-2000)}`));
             });
         });
 
@@ -550,6 +550,22 @@ async function spawnIsolatedChromeOnce(
     }
 }
 
+export function isContainerSandboxNamespaceDenial(
+    errMessage: string,
+    insideContainer = isRunningInsideLinuxContainer()
+): boolean {
+    if (!insideContainer || process.env.CHROMIUM_STRICT_SANDBOX === '1') {
+        return false;
+    }
+    return (
+        errMessage.includes('No usable sandbox') ||
+        errMessage.includes('Failed to move to new namespace') ||
+        errMessage.includes('Operation not permitted') ||
+        errMessage.includes('setuid sandbox is not running as root') ||
+        errMessage.includes('PR_SET_NO_NEW_PRIVS')
+    );
+}
+
 async function launchIsolatedChrome(
     chromeBin: string,
     profileDir: string,
@@ -564,17 +580,11 @@ async function launchIsolatedChrome(
             throw firstErr;
         }
         const msg = firstErr instanceof Error ? firstErr.message : String(firstErr);
-        const isContainerNamespaceDenial =
-            isRunningInsideLinuxContainer() &&
-            process.env.CHROMIUM_STRICT_SANDBOX !== '1' &&
-            (msg.includes('No usable sandbox') ||
-                msg.includes('Failed to move to new namespace') ||
-                msg.includes('Operation not permitted'));
-        if (!isContainerNamespaceDenial) {
+        if (!isContainerSandboxNamespaceDenial(msg)) {
             throw firstErr;
         }
         console.warn(
-            '[LLM Player] Container seccomp blocked nested Chromium namespaces; falling back to container-isolated headless mode'
+            '[LLM Player] Container seccomp/no-new-privileges blocked nested Chromium namespaces; falling back to container-isolated headless mode'
         );
         return spawnIsolatedChromeOnce(chromeBin, profileDir, timezone, useSwiftShader, true, session);
     }
@@ -1076,6 +1086,8 @@ export async function runLlmDailyChallenge(
         const matchStart = performance.now();
         const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'maptap-llm-chrome-'));
         fs.chmodSync(profileDir, 0o700);
+        fs.mkdirSync(path.join(profileDir, '.config'), { recursive: true, mode: 0o700 });
+        fs.mkdirSync(path.join(profileDir, '.cache'), { recursive: true, mode: 0o700 });
         const abortController = new AbortController();
         const session: ActiveBrowserSession = {
             proc: null,
