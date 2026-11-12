@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "tsc && node -e \"const fs=require('fs');fs.mkdirSync('dist/data',{recursive:true});fs.copyFileSync('src/data/countries.geojson','dist/data/countries.geojson')\"",
     "test": "npm run build && TZ=UTC node --test test/safety.test.mjs",
     "check:lockfile": "node scripts/check-lockfile-age.mjs",
     "start": "node dist/index.js",

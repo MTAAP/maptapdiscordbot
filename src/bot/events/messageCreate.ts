@@ -3,6 +3,7 @@ import { config } from '../../config';
 import { parseMapTapMessage, normalizeGameDate } from '../../services/scoreParser';
 import { insertScore, getCurrentTopScore, insertRecord } from '../../database/queries';
 import { areRecordAnnouncementsReady } from '../../services/channelImport';
+import { ensureChallengeSyncedForDate } from '../../services/challengeSync';
 
 export async function handleMessage(message: Message): Promise<void> {
     try {
@@ -36,6 +37,11 @@ export async function handleMessage(message: Message): Promise<void> {
             // Score already exists (duplicate message or user already played today)
             return;
         }
+
+        // Background-sync challenge locations for this game date if not yet cached
+        void ensureChallengeSyncedForDate(normalizedDate).catch(err => {
+            console.warn(`Background challenge sync failed for ${normalizedDate}:`, err);
+        });
 
         // Check if this is a new record (only after initial backfill has completed cleanly)
         if (areRecordAnnouncementsReady() && (!currentRecord || parsed.finalScore > currentRecord.score)) {

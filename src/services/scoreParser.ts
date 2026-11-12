@@ -26,17 +26,15 @@ const MONTHS: Record<string, number> = {
 };
 
 export function parseMapTapMessage(content: string): ParsedMapTapScore | null {
-    if (!content.startsWith('www.maptap.gg')) {
-        return null;
-    }
-
     const lines = content.split(/\r?\n/);
     if (lines.length < 3) {
         return null;
     }
 
-    // Extract date from first line: "www.maptap.gg November 11"
-    const dateMatch = lines[0].match(/^www\.maptap\.gg\s+(.+)$/);
+    // Extract date from first line:
+    // "www.maptap.gg November 11", "https://maptap.gg November 11",
+    // "https://www.maptap.gg November 11", or "MapTap November 11"
+    const dateMatch = lines[0].match(/^(?:(?:https?:\/\/)?(?:www\.)?maptap\.gg|MapTap)\s+(.+)$/);
     if (!dateMatch) {
         return null;
     }
@@ -63,13 +61,17 @@ export function parseMapTapMessage(content: string): ParsedMapTapScore | null {
         return null;
     }
 
-    // Extract round scores (1-3 digits not preceded by another digit, followed by an emoji)
+    // Extract round scores in linear time:
+    // - Default MapTap format: "96🏅" (digits followed by emoji)
+    // - Flag-share format: "🇵🇱96" or "🌐96" (flag/globe immediately followed by digits)
     const roundsSection = lines.slice(1, finalLineIndex).join('\n');
     const roundScores: number[] = [];
-    const roundPattern = /(?<!\d)(\d{1,3})\s*\p{Extended_Pictographic}/gu;
+    const roundPattern =
+        /(?:(?:\p{Regional_Indicator}{2}|\u{1F310})(\d{1,3})(?!\d)|(?<!\d)(\d{1,3})\s*(?:\p{Regional_Indicator}{2}|\p{Extended_Pictographic}))/gu;
     let match: RegExpExecArray | null;
     while ((match = roundPattern.exec(roundsSection)) !== null) {
-        const roundScore = Number(match[1]);
+        const rawDigits = match[1] ?? match[2];
+        const roundScore = Number(rawDigits);
         if (!Number.isSafeInteger(roundScore) || roundScore < 0 || roundScore > MAX_ROUND_SCORE) {
             return null;
         }

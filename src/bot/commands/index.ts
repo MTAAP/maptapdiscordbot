@@ -14,6 +14,9 @@ import { handleFullStats } from './fullstats';
 import { handleWorst } from './worst';
 import { handleAllPlayers } from './allplayers';
 import { handleWeekly } from './weekly';
+import { handleRegion, handleRegionAutocomplete } from './region';
+import { handlePassport } from './passport';
+import { handleLlm } from './llm';
 
 type CommandHandler = (interaction: ChatInputCommandInteraction) => Promise<void>;
 
@@ -28,9 +31,22 @@ const commands: Map<string, CommandHandler> = new Map([
     ['worst', handleWorst],
     ['allplayers', handleAllPlayers],
     ['weekly', handleWeekly],
+    ['region', handleRegion],
+    ['passport', handlePassport],
+    ['llm', handleLlm],
 ]);
 
 export async function handleInteraction(interaction: Interaction): Promise<void> {
+    if (typeof interaction.isAutocomplete === 'function' && interaction.isAutocomplete()) {
+        if (interaction.commandName !== 'maptap') return;
+        if (interaction.options.getSubcommand(false) === 'region') {
+            await handleRegionAutocomplete(interaction).catch(err => {
+                console.warn('Region autocomplete failed:', err);
+            });
+        }
+        return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
 
     // All maptap commands are subcommands of /maptap
@@ -109,6 +125,41 @@ export function getCommandData(): RESTPostAPIChatInputApplicationCommandsJSONBod
         .addSubcommand(sub =>
             sub.setName('weekly')
                 .setDescription('Show current week\'s progress and standings')
+        )
+        .addSubcommand(sub =>
+            sub.setName('region')
+                .setDescription('Show standings by continent, subregion (e.g. Western Europe), or country')
+                .addStringOption(opt =>
+                    opt.setName('area')
+                        .setDescription('Continent, subregion, or country (leave blank for World Crowns)')
+                        .setRequired(false)
+                        .setAutocomplete(true)
+                )
+                .addIntegerOption(opt =>
+                    opt.setName('min_rounds')
+                        .setDescription('Minimum rounds in area to qualify')
+                        .setMinValue(1)
+                        .setMaxValue(100)
+                        .setRequired(false)
+                )
+        )
+        .addSubcommand(sub =>
+            sub.setName('passport')
+                .setDescription('Show a player\'s strongest regions, blind spots, and top countries')
+                .addUserOption(opt =>
+                    opt.setName('user')
+                        .setDescription('The user to inspect (defaults to you)')
+                        .setRequired(false)
+                )
+        )
+        .addSubcommand(sub =>
+            sub.setName('llm')
+                .setDescription('Compare players against local-smart or view a past day\'s visual replay')
+                .addStringOption(opt =>
+                    opt.setName('date')
+                        .setDescription('Past date in YYYY-MM-DD format to reveal round monologues & replay GIF')
+                        .setRequired(false)
+                )
         );
 
     return [maptapCommand.toJSON()];
