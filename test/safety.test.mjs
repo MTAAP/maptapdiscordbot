@@ -855,6 +855,18 @@ test('Phase 2: llm_daily_runs keeps human scores pure, computes W-L rivalry, and
     assert.equal(childEnv.TZ, 'Europe/Amsterdam');
     delete process.env.SVPG_API_KEY;
 
+    // Container sandbox namespace denial detector must match PR_SET_NO_NEW_PRIVS + Crashpad footer and reject non-container/other errors
+    const noNewPrivsStderr =
+        'The setuid sandbox is not running as root. Common causes:\n' +
+        '  * A parent process set prctl(PR_SET_NO_NEW_PRIVS, ...)\n' +
+        'Failed to move to new namespace: PID namespaces supported, Network namespace supported, but failed: errno = Operation not permitted\n' +
+        '[14:14:1112/002415.213917:FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:228] Zygote process exited prematurely with exit code 1\n' +
+        '[1112/002415.217919:ERROR:third_party/crashpad/crashpad/util/file/file_io_posix.cc:145] open /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq: No such file or directory (2)\n' +
+        '[1112/002415.218010:ERROR:third_party/crashpad/crashpad/util/file/file_io_posix.cc:145] open /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq: No such file or directory (2)\n';
+    assert.equal(llmPlayerMod.isContainerSandboxNamespaceDenial(noNewPrivsStderr, true), true);
+    assert.equal(llmPlayerMod.isContainerSandboxNamespaceDenial(noNewPrivsStderr, false), false);
+    assert.equal(llmPlayerMod.isContainerSandboxNamespaceDenial('SyntaxError: Unexpected token', true), false);
+
     // Distinct dates must not coalesce onto another date's in-flight promise
     const bogusChrome = path.join(tmpDir, 'nonexistent-chrome-bin');
     fs.writeFileSync(bogusChrome, '');
