@@ -1584,6 +1584,54 @@ export function parseLlmRoundDetails(run: LlmDailyRunRecord | null): LlmRoundDet
     }
 }
 
+export function parseLlmRoundScores(run: LlmDailyRunRecord | null): number[] {
+    if (run?.round_scores) {
+        try {
+            const parsed = JSON.parse(run.round_scores) as unknown[];
+            if (Array.isArray(parsed)) {
+                const nums = parsed.filter(
+                    (v): v is number => typeof v === 'number' && Number.isFinite(v)
+                );
+                if (nums.length > 0) return nums.slice(0, 5);
+            }
+        } catch {
+            // fall through to round_details fallback
+        }
+    }
+
+    const details = parseLlmRoundDetails(run);
+    if (details.length === 0) return [];
+    return [...details]
+        .sort((a, b) => a.round - b.round)
+        .map(d => d.rawScore)
+        .slice(0, 5);
+}
+
+export function getHumanRoundLobbyMeans(gameDate: string): Array<number | null> {
+    const scores = getScoresForDate(gameDate);
+    const sums = [0, 0, 0, 0, 0];
+    const counts = [0, 0, 0, 0, 0];
+
+    for (const s of scores) {
+        if (!s.round_scores) continue;
+        try {
+            const arr = JSON.parse(s.round_scores) as unknown[];
+            if (!Array.isArray(arr)) continue;
+            for (let i = 0; i < 5; i++) {
+                const val = arr[i];
+                if (typeof val === 'number' && Number.isFinite(val)) {
+                    sums[i] += val;
+                    counts[i]++;
+                }
+            }
+        } catch {
+            continue;
+        }
+    }
+
+    return sums.map((sum, i) => (counts[i] > 0 ? sum / counts[i] : null));
+}
+
 export function getLlmDayPlacement(gameDate: string): LlmDayLobbyPlacement | null {
     const run = getLlmDailyRun(gameDate);
     if (!run || run.status !== 'completed' || run.total_score === null) {

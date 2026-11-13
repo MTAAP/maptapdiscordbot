@@ -23,7 +23,7 @@ A Discord bot that tracks MapTap geography game scores, posts daily and weekly s
 - `/maptap stats [@user]`: Show stats and geography snapshot for a user (defaults to you)
 - `/maptap region [area] [min_rounds]`: Show World Crowns or standings for a continent, subregion, or country
 - `/maptap passport [@user]`: Show a user's strongest subregions, blind spots, and best countries
-- `/maptap llm [date]`: Show human vs. `local-smart` head-to-head records, or reveal a completed past date's round monologues and replay GIF
+- `/maptap llm [date]`: Show human vs. `local-smart` head-to-head records and today's spoiler-free `Round 1` to `Round 5` breakdown, or reveal a completed past date's round locations, monologues, and replay GIF
 - `/maptap delta`: Show biggest deltas (score vs daily average)
 - `/maptap import`: Backfill historical scores from channel history since 2024-01-01 (Administrator only)
 

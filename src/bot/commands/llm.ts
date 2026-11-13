@@ -1,8 +1,14 @@
 import fs from 'fs';
-import { AttachmentBuilder, ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
+import {
+    AttachmentBuilder,
+    ChatInputCommandInteraction,
+    EmbedBuilder,
+    MessageFlags,
+} from 'discord.js';
 import { config } from '../../config';
 import {
     getDailyChallengeBreakdown,
+    getHumanRoundLobbyMeans,
     getLlmDailyRun,
     getLlmDayPlacement,
     getLlmVsHumansStats,
@@ -10,7 +16,11 @@ import {
 } from '../../database/queries';
 import { ensureChallengeSyncedForDate } from '../../services/challengeSync';
 import { isLlmPlayerConfigured } from '../../services/llmPlayer';
-import { createLlmDayRevealEmbed, createLlmRivalryEmbed } from '../../utils/embeds';
+import {
+    createLlmDayRevealEmbed,
+    createLlmRivalryEmbed,
+    createLlmTodaySpoilerFreeEmbed,
+} from '../../utils/embeds';
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -22,11 +32,13 @@ export async function handleLlm(interaction: ChatInputCommandInteraction): Promi
         const summary = getLlmVsHumansStats();
         const todayRun = getLlmDailyRun(today);
         const todayPlacement = getLlmDayPlacement(today);
+        const todayLobbyRoundMeans = getHumanRoundLobbyMeans(today);
         const embed = createLlmRivalryEmbed(
             summary,
             todayRun,
             todayPlacement,
-            isLlmPlayerConfigured()
+            isLlmPlayerConfigured(),
+            todayLobbyRoundMeans
         );
         await interaction.reply({ embeds: [embed] });
         return;
@@ -37,18 +49,54 @@ export async function handleLlm(interaction: ChatInputCommandInteraction): Promi
             .setTitle('🤖 Invalid Date Format')
             .setDescription('Pass a date in `YYYY-MM-DD` format (for example `2026-11-11`), or leave `date` blank for the overall rivalry table.')
             .setColor(0xe74c3c);
-        await interaction.reply({ embeds: [badDate], ephemeral: true });
+        await interaction.reply({ embeds: [badDate], flags: MessageFlags.Ephemeral });
         return;
     }
 
-    if (requestedDate >= today) {
-        const spoilerEmbed = new EmbedBuilder()
-            .setTitle('🕵️ Spoiler Gate Active')
+    if (requestedDate > today) {
+        const futureEmbed = new EmbedBuilder()
+            .setTitle('🕵️ Future Date Locked')
             .setDescription(
-                `Round locations, monologues, and the replay GIF for **${requestedDate}** stay locked until midnight (${config.timezone}) so nobody gets spoiled.\n\nUse \`/maptap daily\` to check today's spoiler-free benchmark score.`
+                `No challenge run exists yet for **${requestedDate}** (${config.timezone}).`
             )
             .setColor(0xf39c12);
-        await interaction.reply({ embeds: [spoilerEmbed], ephemeral: true });
+        await interaction.reply({ embeds: [futureEmbed], flags: MessageFlags.Ephemeral });
+        return;
+    }
+
+    if (requestedDate === today) {
+        const todayRun = getLlmDailyRun(today);
+        if (todayRun?.status === 'running') {
+            const runningEmbed = new EmbedBuilder()
+                .setTitle(`⏳ Today's Run in Progress (${today})`)
+                .setDescription(
+                    '`local-smart` is currently playing today\'s 5-round globe challenge in headless Chromium. Try again in a few minutes.'
+                )
+                .setColor(0x9b59b6);
+            await interaction.reply({ embeds: [runningEmbed] });
+            return;
+        }
+        if (!todayRun || todayRun.status !== 'completed') {
+            const missingToday = new EmbedBuilder()
+                .setTitle(`🤖 No Completed Run for ${today}`)
+                .setDescription(
+                    todayRun?.status === 'failed'
+                        ? `The \`local-smart\` run for **${today}** did not complete (${todayRun.error_message || 'unknown error'}).`
+                        : `No \`local-smart\` challenge run is recorded yet for **${today}**.`
+                )
+                .setColor(0x808080);
+            await interaction.reply({ embeds: [missingToday] });
+            return;
+        }
+
+        const embed = createLlmTodaySpoilerFreeEmbed(
+            today,
+            todayRun,
+            getLlmDayPlacement(today),
+            getHumanRoundLobbyMeans(today),
+            config.timezone
+        );
+        await interaction.reply({ embeds: [embed] });
         return;
     }
 
