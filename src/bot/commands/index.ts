@@ -157,7 +157,7 @@ export function getCommandData(): RESTPostAPIChatInputApplicationCommandsJSONBod
                 .setDescription('Compare players against local-smart or view a past day\'s visual replay')
                 .addStringOption(opt =>
                     opt.setName('date')
-                        .setDescription('Past date in YYYY-MM-DD format to reveal round monologues & replay GIF')
+                        .setDescription('Date in YYYY-MM-DD (today: spoiler-free rounds; past: full replay & GIF)')
                         .setRequired(false)
                 )
         );

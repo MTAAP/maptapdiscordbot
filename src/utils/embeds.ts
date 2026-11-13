@@ -1,6 +1,7 @@
 import { EmbedBuilder } from 'discord.js';
 import {
     parseLlmRoundDetails,
+    parseLlmRoundScores,
     type ChallengeRoundBreakdown,
     type DailyStats,
     type GeoLeaderboardResult,
@@ -121,15 +122,60 @@ function pickBestLlmMonologue(details: LlmRoundDetail[]): LlmRoundDetail | null 
     )[0];
 }
 
+const MAPTAP_ROUND_MULTIPLIERS = [1, 1, 2, 3, 3] as const;
+
+export function buildSpoilerFreeRoundBreakdownLines(
+    llmRun: LlmDailyRunRecord,
+    lobbyRoundMeans?: Array<number | null>
+): string[] {
+    const scores = parseLlmRoundScores(llmRun);
+    const detailsByRound = new Map(parseLlmRoundDetails(llmRun).map(d => [d.round, d]));
+
+    const roundNumbers =
+        scores.length > 0
+            ? scores.map((_, idx) => idx + 1)
+            : [...detailsByRound.keys()].sort((a, b) => a - b).slice(0, 5);
+
+    return roundNumbers.map(roundNum => {
+        const detail = detailsByRound.get(roundNum);
+        const rawScore = scores[roundNum - 1] ?? detail?.rawScore ?? 0;
+        const multiplier = detail?.multiplier ?? MAPTAP_ROUND_MULTIPLIERS[roundNum - 1] ?? 1;
+        const weightedPoints = detail?.weightedPoints ?? rawScore * multiplier;
+        const lobbyMean = lobbyRoundMeans?.[roundNum - 1] ?? null;
+        const lobbyPart =
+            lobbyMean !== null && lobbyMean !== undefined
+                ? ` · Lobby μ **${formatAverage(lobbyMean)}**`
+                : '';
+        return `• **Round ${roundNum}** (${multiplier}×): **${rawScore}**/100 → **${weightedPoints}** pts${lobbyPart}`;
+    });
+}
+
 function buildSpoilerFreeLlmTeaser(
     llmRun: LlmDailyRunRecord,
-    placement?: LlmDayLobbyPlacement | null
+    placement?: LlmDayLobbyPlacement | null,
+    options: {
+        includeRoundBreakdown?: boolean;
+        lobbyRoundMeans?: Array<number | null>;
+    } = {}
 ): string {
     const score = formatNumber(llmRun.total_score ?? 0);
-    if (!placement || placement.humanCount === 0) {
-        return `**${score}** pts (blind visual crosshair via \`${llmRun.model}\`) · No human scores posted yet. Replay & monologues unlock at midnight.`;
+    const header =
+        !placement || placement.humanCount === 0
+            ? `**${score}** pts (blind visual crosshair via \`${llmRun.model}\`) · No human scores posted yet.`
+            : `**${score}** pts (blind visual crosshair via \`${llmRun.model}\`) · Virtual Rank **#${placement.virtualRank}** of ${placement.humanCount + 1} (beat **${placement.humansBeaten}/${placement.humanCount}** humans so far, ${formatSignedDelta(placement.deltaVsLobby ?? 0)} vs lobby).`;
+
+    if (options.includeRoundBreakdown) {
+        const roundLines = buildSpoilerFreeRoundBreakdownLines(llmRun, options.lobbyRoundMeans);
+        const breakdownBlock = roundLines.length > 0 ? `\n${roundLines.join('\n')}` : '';
+        return `${header}${breakdownBlock}\n_Locations, monologues & replay GIF unlock at midnight._`;
     }
-    return `**${score}** pts (blind visual crosshair via \`${llmRun.model}\`) · Virtual Rank **#${placement.virtualRank}** of ${placement.humanCount + 1} (beat **${placement.humansBeaten}/${placement.humanCount}** humans so far, ${formatSignedDelta(placement.deltaVsLobby ?? 0)} vs lobby). Replay unlocks at midnight.`;
+
+    const scores = parseLlmRoundScores(llmRun);
+    const compactRounds =
+        scores.length > 0
+            ? `\n${scores.map((s, idx) => `Round ${idx + 1}: **${s}**`).join(' · ')}`
+            : '';
+    return `${header}${compactRounds}\n_Locations, monologues & replay GIF unlock at midnight._`;
 }
 
 export function createDailySummaryEmbed(
@@ -637,7 +683,8 @@ export function createLlmRivalryEmbed(
     summary: LlmHeadToHeadSummary,
     todayRun: LlmDailyRunRecord | null,
     todayPlacement: LlmDayLobbyPlacement | null,
-    configured: boolean
+    configured: boolean,
+    todayLobbyRoundMeans?: Array<number | null>
 ): EmbedBuilder {
     const embed = new EmbedBuilder()
         .setTitle('🤖 Humans vs. local-smart — Daily Rivalry')
@@ -698,10 +745,10 @@ export function createLlmRivalryEmbed(
         if (todayRun.status === 'completed' && todayRun.total_score !== null) {
             embed.addFields({
                 name: "🕵️ Today's Benchmark (Spoiler-Locked Until Midnight)",
-                value: buildSpoilerFreeLlmTeaser(todayRun, todayPlacement).slice(
-                    0,
-                    DISCORD_EMBED_FIELD_LIMIT
-                ),
+                value: buildSpoilerFreeLlmTeaser(todayRun, todayPlacement, {
+                    includeRoundBreakdown: true,
+                    lobbyRoundMeans: todayLobbyRoundMeans,
+                }).slice(0, DISCORD_EMBED_FIELD_LIMIT),
             });
         } else if (todayRun.status === 'running') {
             embed.addFields({
@@ -734,6 +781,41 @@ export function createLlmRivalryEmbed(
     }
 
     embed.setFooter({ text: 'Inspect any completed past day + replay GIF with /maptap llm date:YYYY-MM-DD' });
+    return embed;
+}
+
+export function createLlmTodaySpoilerFreeEmbed(
+    date: string,
+    run: LlmDailyRunRecord,
+    placement: LlmDayLobbyPlacement | null,
+    lobbyRoundMeans?: Array<number | null>,
+    timezone?: string
+): EmbedBuilder {
+    const placementLine =
+        placement && placement.humanCount > 0
+            ? `Virtual Rank **#${placement.virtualRank}** of ${placement.humanCount + 1} · Beat **${placement.humansBeaten}/${placement.humanCount}** humans so far (${formatSignedDelta(placement.deltaVsLobby ?? 0)} vs lobby)`
+            : 'No human scores posted yet today';
+
+    const embed = new EmbedBuilder()
+        .setTitle(`🕵️ local-smart Benchmark — ${formatDate(date)} (Spoiler-Free)`)
+        .setDescription(
+            `**Final Score: ${formatNumber(run.total_score ?? 0)} / 1,000** (Raw **${run.raw_score ?? 0}**/500 · ${run.total_steps ?? 0} visual steps)\n${placementLine}`
+        )
+        .setColor(0x9b59b6)
+        .setTimestamp();
+
+    const roundLines = buildSpoilerFreeRoundBreakdownLines(run, lobbyRoundMeans);
+    if (roundLines.length > 0) {
+        embed.addFields({
+            name: '🎯 Round Breakdown (Spoiler-Locked Until Midnight)',
+            value: roundLines.join('\n').slice(0, DISCORD_EMBED_FIELD_LIMIT),
+        });
+    }
+
+    const tzSuffix = timezone ? ` (${timezone})` : '';
+    embed.setFooter({
+        text: `Locations, monologues & replay GIF unlock at midnight${tzSuffix} · Model: ${run.model}`,
+    });
     return embed;
 }
 

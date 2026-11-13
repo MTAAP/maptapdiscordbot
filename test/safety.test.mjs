@@ -833,17 +833,101 @@ test('Phase 2: llm_daily_runs keeps human scores pure, computes W-L rivalry, and
     assert.ok(midnightJson.includes('Salento instep'));
     assert.ok(midnightJson.includes('attachment://maptap-local-smart-2026-11-10.gif'));
 
-    // /maptap llm date:<today> must trigger spoiler gate
+    // /maptap llm (default and date:<today>) shows Round 1..5 scores without leaking cities, monologues, or GIF
     const todayIso = queries.getTodayDate('Europe/Amsterdam');
-    let spoilerReply = null;
+    queries.insertScore('u_grissom', '.grissom', 860, [94, 88, 90, 84, 80], todayIso, 'm_g_today');
+    queries.upsertLlmDailyRunStart(todayIso, 'local-smart', 'visual-crosshair');
+    queries.completeLlmDailyRun({
+        gameDate: todayIso,
+        model: 'local-smart',
+        mode: 'visual-crosshair',
+        totalScore: 428,
+        rawScore: 243,
+        roundScores: [83, 31, 73, 19, 37],
+        roundDetails: [
+            {
+                round: 1,
+                multiplier: 1,
+                cityName: 'Reykjavik, Iceland',
+                rawScore: 83,
+                weightedPoints: 83,
+                distanceKm: 854,
+                stepCount: 7,
+                forcedDrop: false,
+                confidence: 65,
+                monologue: 'Hallgrimskirkja coastline clue in southwestern Iceland!',
+                snarkyText: 'Nice!',
+            },
+            {
+                round: 4,
+                multiplier: 3,
+                cityName: 'Apia, Samoa',
+                rawScore: 19,
+                weightedPoints: 57,
+                distanceKm: 7767,
+                stepCount: 7,
+                forcedDrop: true,
+                confidence: 25,
+                monologue: 'Tiny Polynesian volcanic island chain near Samoa!',
+                snarkyText: 'Oof!',
+            },
+        ],
+        totalSteps: 35,
+        wallClockMs: 420_000,
+        promptTokens: 50_000,
+        completionTokens: 9_000,
+        reasoningTokens: 2_800,
+        gifPath: fakeGifPath,
+    });
+
+    let defaultLlmReply = null;
+    await llmCmdMod.handleLlm({
+        options: { getString: () => null },
+        reply: async payload => {
+            defaultLlmReply = payload;
+        },
+    });
+    const defaultLlmJson = JSON.stringify(defaultLlmReply.embeds[0].toJSON());
+    assert.ok(defaultLlmJson.includes('Round 1'));
+    assert.ok(defaultLlmJson.includes('Round 2'));
+    assert.ok(defaultLlmJson.includes('Round 3'));
+    assert.ok(defaultLlmJson.includes('Round 4'));
+    assert.ok(defaultLlmJson.includes('Round 5'));
+    assert.ok(defaultLlmJson.includes('**83**/100'));
+    assert.ok(defaultLlmJson.includes('**19**/100 → **57** pts'));
+    assert.ok(defaultLlmJson.includes('Lobby μ **84**'));
+    assert.ok(!defaultLlmJson.includes('Reykjavik'));
+    assert.ok(!defaultLlmJson.includes('Hallgrimskirkja'));
+    assert.ok(!defaultLlmJson.includes('Apia'));
+    assert.ok(!defaultLlmJson.includes('Samoa'));
+    assert.equal(defaultLlmReply.files, undefined);
+
+    let todayDateReply = null;
     await llmCmdMod.handleLlm({
         options: { getString: () => todayIso },
         reply: async payload => {
-            spoilerReply = payload;
+            todayDateReply = payload;
         },
     });
-    assert.equal(spoilerReply?.ephemeral, true);
-    assert.ok(JSON.stringify(spoilerReply).includes('Spoiler Gate Active'));
+    const todayDateJson = JSON.stringify(todayDateReply.embeds[0].toJSON());
+    assert.ok(todayDateJson.includes('Round 1'));
+    assert.ok(todayDateJson.includes('Round 5'));
+    assert.ok(todayDateJson.includes('**37**/100 → **111** pts'));
+    assert.ok(!todayDateJson.includes('Reykjavik'));
+    assert.ok(!todayDateJson.includes('Hallgrimskirkja'));
+    assert.ok(!todayDateJson.includes('Apia'));
+    assert.equal(todayDateReply.files, undefined);
+
+    // Future date stays gated ephemerally using MessageFlags.Ephemeral
+    let futureReply = null;
+    await llmCmdMod.handleLlm({
+        options: { getString: () => '2999-01-01' },
+        reply: async payload => {
+            futureReply = payload;
+        },
+    });
+    assert.ok(futureReply?.flags !== undefined);
+    assert.ok(JSON.stringify(futureReply).includes('Future Date Locked'));
 
     // Browser child environment must strip DISCORD_TOKEN, SVPG_API_KEY, and DATABASE_PATH
     process.env.SVPG_API_KEY = 'secret-svpg-key-must-not-leak';
