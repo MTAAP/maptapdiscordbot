@@ -16,6 +16,7 @@ RUN apt-get update \
         chromium-sandbox \
         fonts-liberation \
         ca-certificates \
+        tini \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -34,4 +35,5 @@ USER node
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD node -e "const s = require('fs').statSync('/tmp/mappy-heartbeat'); process.exit(Date.now() - s.mtimeMs < 120000 ? 0 : 1)"
 
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "dist/index.js"]
