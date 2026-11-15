@@ -15,11 +15,15 @@ import { getTodayDate } from '../utils/dates';
 import { encodeAnimatedGifAsync, GifFrameInput } from '../utils/gifEncoder';
 
 export const LLM_PLAYER_MODE = 'visual-crosshair';
+export const MAX_STEPS_PER_ROUND = 12;
 
-const MAX_STEPS_PER_ROUND = 7;
 const GIF_SIZE = 540;
 const REPLAY_RETENTION_DAYS = 30;
 const MAX_DISCORD_SAFE_GIF_BYTES = 9 * 1024 * 1024;
+
+export interface CdpEvaluator {
+    send<T = Record<string, unknown>>(method: string, params?: Record<string, unknown>): Promise<T>;
+}
 
 interface MinimalWebSocket {
     send(data: string): void;
@@ -34,6 +38,24 @@ interface MinimalWebSocket {
 declare const WebSocket: new (url: string) => MinimalWebSocket;
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+
+function abortableSleep(ms: number, abortSignal?: AbortSignal): Promise<void> {
+    if (ms <= 0) return Promise.resolve();
+    if (abortSignal?.aborted) {
+        return Promise.reject(new Error('LLM player run aborted'));
+    }
+    return new Promise<void>((resolve, reject) => {
+        const onAbort = () => {
+            clearTimeout(timer);
+            reject(new Error('LLM player run aborted'));
+        };
+        const timer = setTimeout(() => {
+            abortSignal?.removeEventListener('abort', onAbort);
+            resolve();
+        }, ms);
+        abortSignal?.addEventListener('abort', onAbort, { once: true });
+    });
+}
 
 class CDPClient {
     private ws: MinimalWebSocket | null = null;
@@ -179,7 +201,7 @@ const TOOLS = [
                     ns_ms: {
                         type: 'number',
                         description:
-                            'Duration in ms to hold north/south key (0 to 2800). With fine=false: ~2200ms crosses ~80 deg at full-globe view; ~700ms moves ~25% of visible globe width; ~250ms nudges ~10% of visible width.',
+                            'Duration in ms to hold north/south key (0 to 3200). With fine=false at full-globe view: ~800ms moves ~26 deg latitude; ~1500ms moves ~50 deg latitude. Scales automatically with camera altitude (~25% of visible height per 750ms).',
                     },
                     east_west: {
                         type: 'string',
@@ -190,7 +212,7 @@ const TOOLS = [
                     ew_ms: {
                         type: 'number',
                         description:
-                            'Duration in ms to hold east/west key (0 to 2800). Scales automatically with camera altitude.',
+                            'Duration in ms to hold east/west key (0 to 3200). With fine=false at full-globe view: ~1800ms moves ~95 deg longitude (Americas -> Western Europe); ~2600ms moves ~140 deg (Americas -> Eastern Europe/Middle East); ~3200ms moves ~170 deg. Scales automatically with altitude.',
                     },
                     zoom: {
                         type: 'string',
@@ -201,7 +223,7 @@ const TOOLS = [
                     zoom_ms: {
                         type: 'number',
                         description:
-                            'Duration in ms to hold zoom key (0 to 1800). With fine=false: ~800ms zooms ~2.7x closer; ~1200ms zooms ~5x closer.',
+                            'Duration in ms to hold zoom key (0 to 2000). With fine=false: ~900ms zooms ~1.7x closer; ~1200ms zooms ~2.1x closer; ~1800ms zooms ~3.0x closer.',
                     },
                     fine: {
                         type: 'boolean',
@@ -256,21 +278,22 @@ const SYSTEM_PROMPT = `You are Mappy's blind-hands visual geography player compe
 
 HOW YOUR CONTROLS & CROSSHAIR WORK:
 - Every screenshot is 900x900 px. A bright cyan-and-magenta reticle crosshair marks the EXACT pixel where pressing Space (drop_pin) drops your pin. Look directly through the open circular center of that crosshair.
-- You have at most 7 actions total per round (Steps 1..7), including drop_pin. If you have not called drop_pin by Step 7, Space is automatically pressed after Step 7.
-- Ideal cadence: 3 to 6 steps:
-  1) Deduce the exact real-world city/place from the clue (identify the specific city, its country, and where it sits relative to coastlines, peninsulas, lakes, islands, or river valleys).
-  2) Coarse pan to the region + moderate zoom in (e.g., zoom="in", zoom_ms=800..1000). Note: zoom="out" runs BEFORE panning; zoom="in" runs AFTER panning in the same navigate_globe call.
-  3) Inspect coastlines, lakes, peninsulas, mountains, and urban patches relative to the crosshair center. Zoom closer (zoom_ms=700..1000) and use fine=true (0.25x speed) for surgical nudges so the crosshair center sits dead-on the city.
-  4) Call drop_pin({ confidence, monologue }) once centered.
+- You have up to 12 actions per round (Steps 1..12), including drop_pin. If you have not called drop_pin by Step 12, Space is automatically pressed after Step 12.
+- Recommended workflow (typically 4 to 8 steps, with up to 12 available when crossing hemispheres or refining city placement):
+  1) Deduce the exact real-world place from the clue (identify the specific city/landmark, its country, and where it sits relative to coastlines, peninsulas, bays, lakes, islands, river bends, or mountain ranges).
+  2) Coarse pan from full-globe view to the target region before zooming deep, optionally pairing with a moderate zoom="in" (zoom_ms=700..1000). Note: zoom="out" runs BEFORE panning; zoom="in" runs AFTER panning in the same navigate_globe call.
+  3) Read the visible coastlines, water bodies, terrain, and urban grey/tan patches relative to the crosshair center. If you overshot or lost geographic context, zoom="out" (zoom_ms=700..1100) and re-center rather than guessing blindly.
+  4) Zoom closer in stages (zoom_ms=700..1100) so you can see the actual bay, river confluence, island, or urban footprint, then use fine=true (0.25x speed) for surgical nudges until the crosshair center sits dead-on the target.
+  5) Call drop_pin({ confidence, monologue }) as soon as the crosshair center is locked on the target.
 
 MOVEMENT CALIBRATION (when fine=false):
-- Pan speed automatically scales with camera altitude. At ANY zoom level:
-  - 2200-2600 ms moves ~75-90 deg at full-globe view (e.g. Americas -> Europe/Africa, or Europe -> East Asia).
-  - 1200-1600 ms moves ~40-55 deg at full-globe view (~half the visible globe disk).
-  - 600-900 ms moves ~25-35% of the currently visible terrain width.
-  - 250-450 ms moves ~10-18% of the currently visible terrain width.
-- With fine=true (Shift held), all pan & zoom rates are 0.25x: 300-600 ms gives a tiny, precise 3-7% screen nudge for pinpointing a city.
-- Avoid zooming in so close too early that you lose sight of coastlines and geographic landmarks.`;
+- Round 1 starts centered near North America (~25N, 105W); Rounds 2..5 start near the previous round's reveal view.
+- Pan speed automatically scales with camera altitude. At full-globe view (alt ~2.45):
+  - East/West (ew_ms): ~1800-2000 ms moves ~95-108 deg longitude (e.g. North America 105W -> Western Europe); ~2500-2800 ms moves ~135-150 deg (e.g. North America -> Middle East/India); ~3200 ms moves ~170 deg.
+  - North/South (ns_ms): ~800 ms moves ~26 deg latitude; ~1500 ms moves ~50 deg latitude.
+- At any zoomed view: ~700-900 ms pans ~25-35% of the visible terrain width; ~250-450 ms nudges ~10-18% of visible width.
+- Zoom (zoom_ms): ~900 ms zooms ~1.7x closer; ~1200 ms zooms ~2.1x closer; ~1800 ms zooms ~3.0x closer. Use 2 to 3 staged zooms to reach city-level detail while keeping coastal/river landmarks in view.
+- With fine=true (Shift held), all pan & zoom rates are 0.25x: 300-700 ms gives a tiny, precise 3-8% screen nudge for pinpointing a city.`;
 
 interface ChatToolCall {
     id: string;
@@ -684,7 +707,92 @@ async function ensureProtoCrosshair(cdp: CDPClient, visible: boolean): Promise<v
     });
 }
 
-async function dispatchKey(cdp: CDPClient, type: 'keydown' | 'keyup', code: string): Promise<void> {
+async function setWebGLDrawSuppressed(cdp: CdpEvaluator, suppressed: boolean): Promise<void> {
+    await cdp.send('Runtime.evaluate', {
+        expression: `window.__llmSuppressWebGLDraw = ${suppressed ? 'true' : 'false'};`,
+    });
+}
+
+async function flushSuppressedAnimationFrame(
+    cdp: CdpEvaluator,
+    abortSignal?: AbortSignal
+): Promise<void> {
+    if (abortSignal?.aborted) {
+        throw new Error('LLM player run aborted');
+    }
+    await cdp.send('Runtime.evaluate', {
+        awaitPromise: true,
+        expression: `new Promise(resolve => {
+            window.__llmSuppressWebGLDraw = true;
+            let done = false;
+            const finish = () => {
+                if (done) return;
+                done = true;
+                window.__llmSuppressWebGLDraw = false;
+                resolve(true);
+            };
+            const timer = setTimeout(finish, 250);
+            requestAnimationFrame(() => {
+                clearTimeout(timer);
+                finish();
+            });
+        })`,
+    });
+}
+
+async function settleAndRenderGlobe(
+    cdp: CdpEvaluator,
+    settleMs: number,
+    abortSignal?: AbortSignal
+): Promise<void> {
+    if (abortSignal?.aborted) {
+        throw new Error('LLM player run aborted');
+    }
+    await cdp.send('Runtime.evaluate', {
+        awaitPromise: true,
+        expression: `new Promise(resolve => {
+            window.__llmSuppressWebGLDraw = false;
+            let done = false;
+            const finish = () => {
+                if (done) return;
+                done = true;
+                resolve(true);
+            };
+            const timer = setTimeout(finish, 400);
+            requestAnimationFrame(() => {
+                clearTimeout(timer);
+                finish();
+            });
+        })`,
+    });
+    await abortableSleep(settleMs, abortSignal);
+    await cdp.send('Runtime.evaluate', {
+        awaitPromise: true,
+        expression: `new Promise(resolve => {
+            window.__llmSuppressWebGLDraw = false;
+            let remaining = 3;
+            let done = false;
+            const finish = () => {
+                if (done) return;
+                done = true;
+                resolve(true);
+            };
+            const timer = setTimeout(finish, 1800);
+            const step = () => {
+                remaining--;
+                if (remaining <= 0) {
+                    clearTimeout(timer);
+                    finish();
+                } else {
+                    requestAnimationFrame(step);
+                }
+            };
+            requestAnimationFrame(step);
+        })`,
+    });
+}
+
+async function dispatchKey(cdp: CdpEvaluator, type: 'keydown' | 'keyup', code: string): Promise<void> {
     const key = KEY_INFO[code] ?? '';
     await cdp.send('Runtime.evaluate', {
         expression: `(() => {
@@ -696,52 +804,146 @@ async function dispatchKey(cdp: CDPClient, type: 'keydown' | 'keyup', code: stri
     });
 }
 
-async function holdSingleKey(cdp: CDPClient, code: string, ms: number, fine: boolean): Promise<void> {
-    if (ms <= 0) return;
-    if (fine) await dispatchKey(cdp, 'keydown', 'ShiftLeft');
-    await dispatchKey(cdp, 'keydown', code);
-    await sleep(ms);
-    await dispatchKey(cdp, 'keyup', code);
-    if (fine) await dispatchKey(cdp, 'keyup', 'ShiftLeft');
-}
-
-async function holdPanKeys(
-    cdp: CDPClient,
-    nsCode: string | null,
-    nsMs: number,
-    ewCode: string | null,
-    ewMs: number,
-    fine: boolean
-): Promise<void> {
-    const activeNs = Boolean(nsCode && nsMs > 0);
-    const activeEw = Boolean(ewCode && ewMs > 0);
-    if (!activeNs && !activeEw) return;
-
-    if (fine) await dispatchKey(cdp, 'keydown', 'ShiftLeft');
-    if (activeNs && nsCode) await dispatchKey(cdp, 'keydown', nsCode);
-    if (activeEw && ewCode) await dispatchKey(cdp, 'keydown', ewCode);
-
-    if (activeNs && activeEw && nsCode && ewCode) {
-        if (nsMs <= ewMs) {
-            await sleep(nsMs);
-            await dispatchKey(cdp, 'keyup', nsCode);
-            if (ewMs - nsMs > 0) await sleep(ewMs - nsMs);
-            await dispatchKey(cdp, 'keyup', ewCode);
-        } else {
-            await sleep(ewMs);
-            await dispatchKey(cdp, 'keyup', ewCode);
-            await sleep(nsMs - ewMs);
-            await dispatchKey(cdp, 'keyup', nsCode);
-        }
-    } else if (activeNs && nsCode) {
-        await sleep(nsMs);
-        await dispatchKey(cdp, 'keyup', nsCode);
-    } else if (activeEw && ewCode) {
-        await sleep(ewMs);
-        await dispatchKey(cdp, 'keyup', ewCode);
+/**
+ * MapTap's keyboard-globe.js clamps per-frame dt to Math.min(0.05, (now - lastFrame) / 1000),
+ * so wall-clock sleeps under-move whenever CPU SwiftShader drops below 20 FPS. Accumulate the
+ * same 50ms-clamped rAF deltas inside the page with WebGL rasterization suppressed during the hold.
+ */
+export async function holdEffectiveKeySegment(
+    cdp: CdpEvaluator,
+    activeKeys: Array<{ code: string; targetMs: number }>,
+    fine: boolean,
+    abortSignal?: AbortSignal
+): Promise<{ effectiveMs: number; frames: number }> {
+    const items = activeKeys
+        .filter(k => k.targetMs > 0)
+        .map(k => ({
+            code: k.code,
+            key: KEY_INFO[k.code] ?? '',
+            targetMs: k.targetMs,
+        }));
+    if (items.length === 0) {
+        return { effectiveMs: 0, frames: 0 };
+    }
+    if (abortSignal?.aborted) {
+        throw new Error('LLM player run aborted');
     }
 
-    if (fine) await dispatchKey(cdp, 'keyup', 'ShiftLeft');
+    const maxTargetMs = Math.max(...items.map(it => it.targetMs));
+    const maxWallMs = Math.min(28_000, Math.max(10_000, maxTargetMs * 8 + 1000));
+    const payload = JSON.stringify({ items, fine, maxWallMs });
+
+    const evalPromise = cdp.send<{ result?: { value?: { effectiveMs: number; frames: number } } }>(
+        'Runtime.evaluate',
+        {
+            awaitPromise: true,
+            returnByValue: true,
+            expression: `((cfg) => new Promise(resolve => {
+                const fireKey = (type, code, key) => {
+                    document.dispatchEvent(new KeyboardEvent(type, {
+                        code,
+                        key,
+                        bubbles: true,
+                        cancelable: true,
+                    }));
+                };
+                if (document.activeElement && document.activeElement.blur) {
+                    document.activeElement.blur();
+                }
+                window.__llmSuppressWebGLDraw = true;
+                if (cfg.fine) {
+                    fireKey('keydown', 'ShiftLeft', 'Shift');
+                }
+                const state = cfg.items.map(it => ({
+                    code: it.code,
+                    key: it.key,
+                    targetMs: it.targetMs,
+                    released: false,
+                }));
+                for (const it of state) {
+                    fireKey('keydown', it.code, it.key);
+                }
+
+                let last = null;
+                let effectiveMs = 0;
+                let frames = 0;
+                let finished = false;
+                const wallDeadline = performance.now() + cfg.maxWallMs;
+
+                const finish = () => {
+                    if (finished) return;
+                    finished = true;
+                    clearTimeout(fallbackTimer);
+                    for (const it of state) {
+                        if (!it.released) {
+                            fireKey('keyup', it.code, it.key);
+                            it.released = true;
+                        }
+                    }
+                    if (cfg.fine) {
+                        fireKey('keyup', 'ShiftLeft', 'Shift');
+                    }
+                    window.__llmSuppressWebGLDraw = false;
+                    resolve({ effectiveMs: Math.round(effectiveMs), frames });
+                };
+
+                const fallbackTimer = setTimeout(finish, cfg.maxWallMs + 250);
+
+                const tick = now => {
+                    if (finished) return;
+                    if (last === null) {
+                        last = now;
+                        requestAnimationFrame(tick);
+                        return;
+                    }
+                    const dtMs = Math.min(50, Math.max(0, now - last));
+                    last = now;
+                    effectiveMs += dtMs;
+                    frames++;
+
+                    let allReleased = true;
+                    for (const it of state) {
+                        if (!it.released && effectiveMs >= it.targetMs) {
+                            fireKey('keyup', it.code, it.key);
+                            it.released = true;
+                        }
+                        if (!it.released) {
+                            allReleased = false;
+                        }
+                    }
+
+                    if (allReleased || performance.now() >= wallDeadline) {
+                        finish();
+                        return;
+                    }
+                    requestAnimationFrame(tick);
+                };
+
+                requestAnimationFrame(tick);
+            }))(${payload})`,
+        }
+    );
+
+    if (!abortSignal) {
+        const res = await evalPromise;
+        return res.result?.value ?? { effectiveMs: 0, frames: 0 };
+    }
+
+    let onAbort: (() => void) | null = null;
+    try {
+        const res = await Promise.race([
+            evalPromise,
+            new Promise<never>((_, reject) => {
+                onAbort = () => reject(new Error('LLM player run aborted'));
+                abortSignal.addEventListener('abort', onAbort, { once: true });
+            }),
+        ]);
+        return res.result?.value ?? { effectiveMs: 0, frames: 0 };
+    } finally {
+        if (onAbort) {
+            abortSignal.removeEventListener('abort', onAbort);
+        }
+    }
 }
 
 function clampMs(val: unknown, maxMs: number): number {
@@ -750,7 +952,7 @@ function clampMs(val: unknown, maxMs: number): number {
     return Math.max(80, Math.min(maxMs, Math.round(n)));
 }
 
-interface AppliedMove {
+export interface AppliedMove {
     nsCode: string | null;
     nsMs: number;
     ewCode: string | null;
@@ -760,32 +962,43 @@ interface AppliedMove {
     fine: boolean;
 }
 
-async function executeNavigateGlobe(
-    cdp: CDPClient,
-    args: Record<string, unknown>
+export async function executeNavigateGlobe(
+    cdp: CdpEvaluator,
+    args: Record<string, unknown>,
+    abortSignal?: AbortSignal
 ): Promise<AppliedMove> {
     const fine = Boolean(args.fine);
     const nsCode = args.north_south === 'north' ? 'KeyW' : args.north_south === 'south' ? 'KeyS' : null;
     const ewCode = args.east_west === 'east' ? 'KeyD' : args.east_west === 'west' ? 'KeyA' : null;
     const zoomCode = args.zoom === 'in' ? 'KeyE' : args.zoom === 'out' ? 'KeyQ' : null;
 
-    const nsMs = nsCode ? clampMs(args.ns_ms, 2800) : 0;
-    const ewMs = ewCode ? clampMs(args.ew_ms, 2800) : 0;
-    const zoomMs = zoomCode ? clampMs(args.zoom_ms, 1800) : 0;
+    const nsMs = nsCode ? clampMs(args.ns_ms, 3200) : 0;
+    const ewMs = ewCode ? clampMs(args.ew_ms, 3200) : 0;
+    const zoomMs = zoomCode ? clampMs(args.zoom_ms, 2000) : 0;
+
+    const panItems: Array<{ code: string; targetMs: number }> = [];
+    if (nsCode && nsMs > 0) panItems.push({ code: nsCode, targetMs: nsMs });
+    if (ewCode && ewMs > 0) panItems.push({ code: ewCode, targetMs: ewMs });
 
     if (zoomCode === 'KeyQ' && zoomMs > 0) {
-        await holdSingleKey(cdp, 'KeyQ', zoomMs, fine);
-        await sleep(80);
+        await holdEffectiveKeySegment(cdp, [{ code: 'KeyQ', targetMs: zoomMs }], fine, abortSignal);
+        if (panItems.length > 0) {
+            await flushSuppressedAnimationFrame(cdp, abortSignal);
+        }
     }
 
-    await holdPanKeys(cdp, nsCode, nsMs, ewCode, ewMs, fine);
+    if (panItems.length > 0) {
+        await holdEffectiveKeySegment(cdp, panItems, fine, abortSignal);
+    }
 
     if (zoomCode === 'KeyE' && zoomMs > 0) {
-        await sleep(80);
-        await holdSingleKey(cdp, 'KeyE', zoomMs, fine);
+        if (panItems.length > 0) {
+            await flushSuppressedAnimationFrame(cdp, abortSignal);
+        }
+        await holdEffectiveKeySegment(cdp, [{ code: 'KeyE', targetMs: zoomMs }], fine, abortSignal);
     }
 
-    await sleep(350);
+    await settleAndRenderGlobe(cdp, zoomCode === 'KeyE' ? 650 : 350, abortSignal);
     return { nsCode, nsMs, ewCode, ewMs, zoomCode, zoomMs, fine };
 }
 
@@ -810,8 +1023,10 @@ interface VisibleRoundHud {
 }
 
 /**
- * Blind-hands boundary: reads ONLY round readiness and visible HUD strings.
- * Never reads window.cities, runtime.activeRoundCity.lat/lng, or myGlobe.pointOfView().
+ * Blind-hands boundary: reads ONLY round readiness, elapsed open time, and visible HUD strings.
+ * MapTap runs a 1500ms intro camera tween on Round 1 and a 1500ms previous-round overlay clear
+ * timeout on Rounds 2..5 after setting runtime.roundOpenedAt; waiting >=1750ms prevents Step 1
+ * from capturing or panning mid-tween without reading any coordinates or pointOfView().
  */
 async function waitForRoundReady(
     cdp: CDPClient,
@@ -822,19 +1037,16 @@ async function waitForRoundReady(
     let stableCount = 0;
 
     for (let i = 0; i < 120; i++) {
-        if (abortSignal?.aborted) {
-            throw new Error(`Aborted waiting for MapTap Round ${targetRound}`);
-        }
-        await sleep(250);
-        if (abortSignal?.aborted) {
-            throw new Error(`Aborted waiting for MapTap Round ${targetRound}`);
-        }
+        await abortableSleep(250, abortSignal);
         const evalRes = await cdp.send<{ result: { value?: VisibleRoundHud } }>('Runtime.evaluate', {
             expression: `(() => {
+                const openedElapsedOk = typeof runtime !== 'undefined'
+                    && (typeof runtime.roundOpenedAt !== 'number' || (performance.now() - runtime.roundOpenedAt) >= 1750);
                 const ready = typeof gameState !== 'undefined'
                     && typeof runtime !== 'undefined'
                     && runtime.currentlyScoring === 0
                     && !!runtime.activeRoundCity
+                    && openedElapsedOk
                     && gameState.round === ${targetRound};
                 const instruction = (document.getElementById('instruction')?.innerText || document.getElementById('info')?.innerText || '').trim();
                 const header = (document.getElementById('info_header')?.innerText || document.getElementById('round-meta')?.innerText || '').trim();
@@ -853,8 +1065,8 @@ async function waitForRoundReady(
         ) {
             if (st.instruction === prevInstruction) {
                 stableCount++;
-                if (stableCount >= 3) {
-                    await sleep(400);
+                if (stableCount >= 2) {
+                    await settleAndRenderGlobe(cdp, 250, abortSignal);
                     return st;
                 }
             } else {
@@ -1120,12 +1332,44 @@ export async function runLlmDailyChallenge(
             );
             let cdp = launched.cdp;
 
-            const bootstrapStorageScript = `
-                localStorage.setItem('maptap_history_setaside', '1');
-                localStorage.setItem('keyboardGlobe', '1');
-            `;
+            const bootstrapPageScript = `(() => {
+                try {
+                    localStorage.setItem('maptap_history_setaside', '1');
+                    localStorage.setItem('keyboardGlobe', '1');
+                } catch {}
+                window.__llmSuppressWebGLDraw = false;
+                if (HTMLCanvasElement.prototype.__llmWebglHooked) return;
+                HTMLCanvasElement.prototype.__llmWebglHooked = true;
+                const origGetContext = HTMLCanvasElement.prototype.getContext;
+                HTMLCanvasElement.prototype.getContext = function (type, ...rest) {
+                    const ctx = origGetContext.call(this, type, ...rest);
+                    if (
+                        ctx &&
+                        !ctx.__llmDrawWrapped &&
+                        (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl')
+                    ) {
+                        ctx.__llmDrawWrapped = true;
+                        for (const fn of [
+                            'drawElements',
+                            'drawArrays',
+                            'drawElementsInstanced',
+                            'drawArraysInstanced',
+                            'clear',
+                        ]) {
+                            if (typeof ctx[fn] === 'function') {
+                                const orig = ctx[fn];
+                                ctx[fn] = function () {
+                                    if (window.__llmSuppressWebGLDraw) return;
+                                    return orig.apply(this, arguments);
+                                };
+                            }
+                        }
+                    }
+                    return ctx;
+                };
+            })();`;
             await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
-                source: bootstrapStorageScript,
+                source: bootstrapPageScript,
             });
             await cdp.send('Page.navigate', { url: maptapUrl });
 
@@ -1154,7 +1398,7 @@ export async function runLlmDailyChallenge(
                 const fallback = await launchIsolatedChrome(chromeBin, profileDir, timezone, true, session);
                 cdp = fallback.cdp;
                 await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
-                    source: bootstrapStorageScript,
+                    source: bootstrapPageScript,
                 });
                 await cdp.send('Page.navigate', { url: maptapUrl });
                 r1Hud = await waitForRoundReady(cdp, 1, abortController.signal);
@@ -1223,14 +1467,21 @@ export async function runLlmDailyChallenge(
                 let finalMonologue = '';
 
                 for (let step = 1; step <= MAX_STEPS_PER_ROUND; step++) {
-                    const { msg, usage } = await callGatewayModel(
-                        baseUrl,
-                        apiKey,
-                        model,
-                        messages,
-                        reasoningEffort,
-                        abortController.signal
-                    );
+                    await setWebGLDrawSuppressed(cdp, true);
+                    let gatewayReply: Awaited<ReturnType<typeof callGatewayModel>>;
+                    try {
+                        gatewayReply = await callGatewayModel(
+                            baseUrl,
+                            apiKey,
+                            model,
+                            messages,
+                            reasoningEffort,
+                            abortController.signal
+                        );
+                    } finally {
+                        await setWebGLDrawSuppressed(cdp, false).catch(() => {});
+                    }
+                    const { msg, usage } = gatewayReply;
 
                     totalPromptTokens += usage.prompt_tokens ?? 0;
                     totalCompletionTokens += usage.completion_tokens ?? 0;
@@ -1267,7 +1518,11 @@ export async function runLlmDailyChallenge(
                         break;
                     }
 
-                    const applied = await executeNavigateGlobe(cdp, parsedArgs);
+                    const applied = await executeNavigateGlobe(
+                        cdp,
+                        parsedArgs,
+                        abortController.signal
+                    );
                     await ensureProtoCrosshair(cdp, true);
                     latestPngB64 = await captureScreenshotBase64(cdp);
 
@@ -1432,7 +1687,7 @@ export async function runLlmDailyChallenge(
                     snarkyText,
                 });
 
-                // Queue GIF frames for this round (Step 0 + up to 3 representative nav steps + Reveal)
+                // Queue GIF frames for this round (Step 0 + up to 4 representative nav steps + Reveal)
                 captionSpecs.push({
                     pngBase64: initialPngB64,
                     topText: `${model} · R${round}/5 ${roundResult.cityName} (${multiplier}x) · Start`,
@@ -1442,7 +1697,7 @@ export async function runLlmDailyChallenge(
                     delayMs: 850,
                 });
 
-                for (const nc of selectRepresentativeSteps(navCaptures, 3)) {
+                for (const nc of selectRepresentativeSteps(navCaptures, 4)) {
                     const keys: string[] = [];
                     if (nc.applied.nsCode) keys.push(`${nc.applied.nsCode}:${nc.applied.nsMs}ms`);
                     if (nc.applied.ewCode) keys.push(`${nc.applied.ewCode}:${nc.applied.ewMs}ms`);
