@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 import { performance } from 'node:perf_hooks';
 import { Collection, TextChannel } from 'discord.js';
 import {
@@ -1001,6 +1002,193 @@ test('Phase 2: llm_daily_runs keeps human scores pure, computes W-L rivalry, and
         childStillAlive = false;
     }
     assert.equal(childStillAlive, false, 'Spawned Chromium child must be terminated by shutdownLlmPlayer');
+});
+
+test('Phase 2: executeNavigateGlobe accumulates full effective rAF dt under 3.3 FPS frames and grants 12 steps per round', async () => {
+    assert.equal(llmPlayerMod.MAX_STEPS_PER_ROUND, 12);
+
+    function createSlowFrameBrowserSandbox(frameStepMs = 300) {
+        let nowMs = 1000;
+        let nextRafId = 1;
+        let rafQueue = new Map();
+        const heldKeys = new Set();
+        const effectiveByKey = { KeyW: 0, KeyS: 0, KeyA: 0, KeyD: 0, KeyE: 0, KeyQ: 0 };
+        const keySequence = [];
+        let suppressDuringPhysicsTicks = true;
+        let physicsTickCount = 0;
+
+        let globeRafId = 0;
+        let globeLastFrame = 0;
+        let tickScheduled = false;
+
+        const scheduleFlush = () => {
+            if (tickScheduled || rafQueue.size === 0) return;
+            tickScheduled = true;
+            setImmediate(stepFrameIfNeeded);
+        };
+
+        const scheduleRaf = cb => {
+            const id = nextRafId++;
+            rafQueue.set(id, cb);
+            scheduleFlush();
+            return id;
+        };
+
+        const globeFrame = now => {
+            const anyMove = ['KeyW', 'KeyS', 'KeyA', 'KeyD', 'KeyE', 'KeyQ'].some(k => heldKeys.has(k));
+            if (!anyMove) {
+                globeRafId = 0;
+                globeLastFrame = 0;
+                return;
+            }
+            const dtMs = globeLastFrame
+                ? Math.min(50, Math.max(0, now - globeLastFrame))
+                : 16;
+            globeLastFrame = now;
+            physicsTickCount++;
+            if (sandbox.window.__llmSuppressWebGLDraw !== true) {
+                suppressDuringPhysicsTicks = false;
+            }
+            for (const code of Object.keys(effectiveByKey)) {
+                if (heldKeys.has(code)) {
+                    effectiveByKey[code] += dtMs;
+                }
+            }
+            globeRafId = scheduleRaf(globeFrame);
+        };
+
+        function stepFrameIfNeeded() {
+            tickScheduled = false;
+            if (rafQueue.size === 0) return;
+            nowMs += frameStepMs;
+            const batch = Array.from(rafQueue.values());
+            rafQueue = new Map();
+            for (const cb of batch) {
+                cb(nowMs);
+            }
+            scheduleFlush();
+        }
+
+        const listeners = { keydown: [], keyup: [] };
+        listeners.keydown.push(ev => {
+            heldKeys.add(ev.code);
+            keySequence.push(`down:${ev.code}`);
+            if (['KeyW', 'KeyS', 'KeyA', 'KeyD', 'KeyE', 'KeyQ'].includes(ev.code) && !globeRafId) {
+                globeLastFrame = 0;
+                globeRafId = scheduleRaf(globeFrame);
+            }
+        });
+        listeners.keyup.push(ev => {
+            heldKeys.delete(ev.code);
+            keySequence.push(`up:${ev.code}`);
+        });
+
+        const sandbox = {
+            window: { __llmSuppressWebGLDraw: false },
+            performance: { now: () => nowMs },
+            requestAnimationFrame: scheduleRaf,
+            cancelAnimationFrame: id => rafQueue.delete(id),
+            setTimeout,
+            clearTimeout,
+            KeyboardEvent: class KeyboardEvent {
+                constructor(type, init = {}) {
+                    this.type = type;
+                    this.code = init.code;
+                    this.key = init.key;
+                }
+            },
+            document: {
+                activeElement: null,
+                dispatchEvent(ev) {
+                    for (const fn of listeners[ev.type] ?? []) {
+                        fn(ev);
+                    }
+                    return true;
+                },
+            },
+        };
+        sandbox.globalThis = sandbox;
+        vm.createContext(sandbox);
+
+        const cdp = {
+            async send(method, params = {}) {
+                assert.equal(method, 'Runtime.evaluate');
+                const val = vm.runInContext(params.expression, sandbox);
+                const resolved = params.awaitPromise ? await val : val;
+                return { result: { value: resolved } };
+            },
+        };
+
+        return {
+            sandbox,
+            cdp,
+            effectiveByKey,
+            keySequence,
+            advanceWallFrames(count) {
+                for (let i = 0; i < count; i++) {
+                    nowMs += frameStepMs;
+                    const batch = Array.from(rafQueue.values());
+                    rafQueue = new Map();
+                    for (const cb of batch) cb(nowMs);
+                }
+            },
+            getStats: () => ({ suppressDuringPhysicsTicks, physicsTickCount }),
+        };
+    }
+
+    const badHarness = createSlowFrameBrowserSandbox(300);
+    badHarness.sandbox.document.dispatchEvent(new badHarness.sandbox.KeyboardEvent('keydown', { code: 'KeyD', key: 'd' }));
+    badHarness.advanceWallFrames(9);
+    badHarness.sandbox.document.dispatchEvent(new badHarness.sandbox.KeyboardEvent('keyup', { code: 'KeyD', key: 'd' }));
+    assert.ok(
+        badHarness.effectiveByKey.KeyD <= 450,
+        `Calibration check must prove naive wall-clock hold under-pans (<20%): got ${badHarness.effectiveByKey.KeyD}ms`
+    );
+
+    const goodHarness = createSlowFrameBrowserSandbox(300);
+    const applied = await llmPlayerMod.executeNavigateGlobe(goodHarness.cdp, {
+        north_south: 'north',
+        ns_ms: 900,
+        east_west: 'east',
+        ew_ms: 3500,
+        zoom: 'in',
+        zoom_ms: 2400,
+        fine: false,
+    });
+
+    assert.deepEqual(applied, {
+        nsCode: 'KeyW',
+        nsMs: 900,
+        ewCode: 'KeyD',
+        ewMs: 3200,
+        zoomCode: 'KeyE',
+        zoomMs: 2000,
+        fine: false,
+    });
+    assert.ok(
+        goodHarness.effectiveByKey.KeyW >= 900 && goodHarness.effectiveByKey.KeyW <= 966,
+        `Expected KeyW effective hold ~900ms, got ${goodHarness.effectiveByKey.KeyW}ms`
+    );
+    assert.ok(
+        goodHarness.effectiveByKey.KeyD >= 3200 && goodHarness.effectiveByKey.KeyD <= 3266,
+        `Expected KeyD effective hold ~3200ms, got ${goodHarness.effectiveByKey.KeyD}ms`
+    );
+    assert.ok(
+        goodHarness.effectiveByKey.KeyE >= 2000 && goodHarness.effectiveByKey.KeyE <= 2066,
+        `Expected KeyE effective hold ~2000ms, got ${goodHarness.effectiveByKey.KeyE}ms`
+    );
+    assert.ok(
+        goodHarness.keySequence.indexOf('down:KeyE') > goodHarness.keySequence.indexOf('up:KeyD'),
+        'Zoom-in (KeyE) must start strictly after pan keys finish releasing'
+    );
+    const stats = goodHarness.getStats();
+    assert.ok(stats.physicsTickCount >= 100);
+    assert.equal(stats.suppressDuringPhysicsTicks, true, 'WebGL draws must stay suppressed throughout key hold');
+    assert.equal(
+        goodHarness.sandbox.window.__llmSuppressWebGLDraw,
+        false,
+        'WebGL draws must be re-enabled before screenshot capture'
+    );
 });
 
 test.after(() => {
