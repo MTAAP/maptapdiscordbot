@@ -1006,6 +1006,8 @@ test('Phase 2: llm_daily_runs keeps human scores pure, computes W-L rivalry, and
 
 test('Phase 2: executeNavigateGlobe accumulates full effective rAF dt under 3.3 FPS frames and grants 12 steps per round', async () => {
     assert.equal(llmPlayerMod.MAX_STEPS_PER_ROUND, 12);
+    const dockerfileText = fs.readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8');
+    assert.match(dockerfileText, /ENTRYPOINT \["\/usr\/bin\/tini", "--"\]/);
 
     function createSlowFrameBrowserSandbox(frameStepMs = 300) {
         let nowMs = 1000;
