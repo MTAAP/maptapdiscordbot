@@ -546,6 +546,70 @@ test('Phase 1: classifyLocation resolves border straits, islands, bare cities, G
         }).countryCode,
         'XX'
     );
+    assert.deepEqual(
+        geographyMod.classifyLocation({
+            name: 'Grytviken, South Georgia, South Sandwich Islands',
+            lat: -54.2811,
+            lng: -36.5092,
+        }),
+        {
+            countryCode: 'GS',
+            countryName: 'South Georgia and the South Sandwich Islands',
+            continent: 'South America',
+            subregion: 'South America',
+        }
+    );
+    assert.equal(
+        geographyMod.classifyLocation({ name: 'Jamestown, Saint Helena', lat: -15.9244, lng: -5.7181 }).countryCode,
+        'SH'
+    );
+    assert.equal(
+        geographyMod.classifyLocation({ name: 'Longyearbyen, Svalbard', lat: 78.2232, lng: 15.6267 }).countryCode,
+        'SJ'
+    );
+    assert.equal(
+        geographyMod.classifyLocation({ name: 'Avarua, Cook Islands', lat: -21.207, lng: -159.771 }).countryCode,
+        'CK'
+    );
+    assert.equal(
+        geographyMod.classifyLocation({ name: 'Cockburn Town, Turks and Caicos', lat: 21.4612, lng: -71.1419 }).countryCode,
+        'TC'
+    );
+
+    dbMod.db.exec('DELETE FROM daily_challenges;');
+    queries.upsertDailyChallengeRounds([
+        {
+            gameDate: '2026-10-15',
+            roundNum: 1,
+            locationId: '2026-10-15-1',
+            name: 'Grytviken, South Georgia, South Sandwich Islands',
+            lat: -54.2811,
+            lng: -36.5092,
+            countryCode: 'XX',
+            countryName: 'International Waters',
+            continent: 'International Waters',
+            subregion: 'International Waters',
+            title: null,
+        },
+        {
+            gameDate: '2026-10-15',
+            roundNum: 2,
+            locationId: '2026-10-15-2',
+            name: 'the location where the Titanic sank',
+            lat: 41.7269,
+            lng: -49.948,
+            countryCode: 'XX',
+            countryName: 'International Waters',
+            continent: 'International Waters',
+            subregion: 'International Waters',
+            title: null,
+        },
+    ]);
+    const upgraded = queries.reclassifyUnmappedChallengeRounds();
+    assert.equal(upgraded, 1);
+    const healedRows = queries.getChallengeForDate('2026-10-15');
+    assert.equal(healedRows[0].country_code, 'GS');
+    assert.equal(healedRows[1].country_code, 'XX');
 });
 
 test('Phase 1: parseChallengeScript handles active year, archived comment year, and wrong-year rejection', () => {
@@ -1191,6 +1255,36 @@ test('Phase 2: executeNavigateGlobe accumulates full effective rAF dt under 3.3 
         false,
         'WebGL draws must be re-enabled before screenshot capture'
     );
+
+    const history = [
+        { role: 'system', content: 'sys' },
+        {
+            role: 'user',
+            content: [
+                { type: 'text', text: 'Step 1' },
+                { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,AAA' } },
+            ],
+        },
+        {
+            role: 'assistant',
+            content: null,
+            reasoning_content: 'long reasoning chain that would otherwise repeat every turn',
+            tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'navigate_globe', arguments: '{}' } }],
+        },
+    ];
+    llmPlayerMod.compactPriorTurns(history);
+    assert.deepEqual(history[1].content, [
+        { type: 'text', text: 'Step 1' },
+        { type: 'text', text: '[previous step screenshot omitted]' },
+    ]);
+    assert.equal(history[2].reasoning_content, '');
+    assert.equal(history[2].tool_calls.length, 1);
+
+    const ciYaml = fs.readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+    const deployYaml = fs.readFileSync(new URL('../.github/workflows/build-and-deploy.yml', import.meta.url), 'utf8');
+    assert.doesNotMatch(ciYaml, /actions\/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5/);
+    assert.doesNotMatch(ciYaml, /actions\/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020/);
+    assert.doesNotMatch(deployYaml, /actions\/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5/);
 });
 
 test.after(() => {

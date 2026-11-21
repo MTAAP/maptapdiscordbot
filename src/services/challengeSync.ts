@@ -5,6 +5,7 @@ import {
     DailyChallengeRoundInput,
     getMissingChallengeDates,
     hasChallengeForDate,
+    reclassifyUnmappedChallengeRounds,
     upsertDailyChallengeRounds,
 } from '../database/queries';
 
@@ -565,6 +566,7 @@ export async function ensureChallengeSyncedForDate(isoDate: string): Promise<boo
 export async function syncMissingChallenges(
     options: { includeToday?: boolean; baseUrl?: string; fetchImpl?: typeof fetch } = {}
 ): Promise<{ attempted: number; synced: number }> {
+    reclassifyUnmappedChallengeRounds();
     const missingSet = new Set(getMissingChallengeDates());
     if (options.includeToday !== false) {
         const today = getTodayDate(config.timezone);

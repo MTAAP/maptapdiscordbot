@@ -1,7 +1,12 @@
 import { db } from './index';
 import { config } from '../config';
 import { getTodayDate } from '../utils/dates';
-import { countryCodeToFlag, findCountryIsoByQuery, getCountryMetadata } from '../services/geography';
+import {
+    classifyLocation,
+    countryCodeToFlag,
+    findCountryIsoByQuery,
+    getCountryMetadata,
+} from '../services/geography';
 
 export { getTodayDate };
 
@@ -747,6 +752,51 @@ export function upsertDailyChallengeRounds(rounds: DailyChallengeRoundInput[]): 
     });
 
     tx(rounds);
+}
+
+export function reclassifyUnmappedChallengeRounds(): number {
+    if (!db.open) return 0;
+    const rows = db
+        .prepare(
+            "SELECT game_date, round_num, name, lat, lng FROM daily_challenges WHERE country_code = 'XX'"
+        )
+        .all() as Array<{
+        game_date: string;
+        round_num: number;
+        name: string;
+        lat: number;
+        lng: number;
+    }>;
+    if (rows.length === 0) return 0;
+
+    const updateStmt = db.prepare(`
+        UPDATE daily_challenges
+        SET country_code = ?,
+            country_name = ?,
+            continent = ?,
+            subregion = ?
+        WHERE game_date = ? AND round_num = ?
+    `);
+
+    let updated = 0;
+    const tx = db.transaction(() => {
+        for (const r of rows) {
+            const geo = classifyLocation({ name: r.name, lat: r.lat, lng: r.lng });
+            if (geo.countryCode !== 'XX') {
+                updateStmt.run(
+                    geo.countryCode,
+                    geo.countryName,
+                    geo.continent,
+                    geo.subregion,
+                    r.game_date,
+                    r.round_num
+                );
+                updated++;
+            }
+        }
+    });
+    tx();
+    return updated;
 }
 
 export function hasChallengeForDate(date: string): boolean {

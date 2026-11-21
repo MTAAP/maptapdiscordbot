@@ -116,14 +116,25 @@ async function fetchPackuments(packageNames) {
             const encoded = name.startsWith('@')
                 ? `@${encodeURIComponent(name.slice(1))}`
                 : encodeURIComponent(name);
-            const res = await fetch(`https://registry.npmjs.org/${encoded}`, {
-                headers: { Accept: 'application/json' },
-                signal: AbortSignal.timeout(15_000),
-            });
-            if (!res.ok) {
-                throw new Error(`Registry lookup failed for ${name}: HTTP ${res.status}`);
+            let packument = null;
+            let lastErr = null;
+            for (let attempt = 1; attempt <= 2; attempt++) {
+                try {
+                    const res = await fetch(`https://registry.npmjs.org/${encoded}`, {
+                        headers: { Accept: 'application/json' },
+                        signal: AbortSignal.timeout(30_000),
+                    });
+                    if (!res.ok) {
+                        throw new Error(`Registry lookup failed for ${name}: HTTP ${res.status}`);
+                    }
+                    packument = await res.json();
+                    break;
+                } catch (err) {
+                    lastErr = err;
+                    if (attempt === 2) throw lastErr;
+                }
             }
-            results.set(name, await res.json());
+            results.set(name, packument);
         }
     }
 
