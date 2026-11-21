@@ -282,7 +282,7 @@ HOW YOUR CONTROLS & CROSSHAIR WORK:
 - Recommended workflow (typically 4 to 8 steps, with up to 12 available when crossing hemispheres or refining city placement):
   1) Deduce the exact real-world place from the clue (identify the specific city/landmark, its country, and where it sits relative to coastlines, peninsulas, bays, lakes, islands, river bends, or mountain ranges).
   2) Coarse pan from full-globe view to the target region before zooming deep, optionally pairing with a moderate zoom="in" (zoom_ms=700..1000). Note: zoom="out" runs BEFORE panning; zoom="in" runs AFTER panning in the same navigate_globe call.
-  3) Read the visible coastlines, water bodies, terrain, and urban grey/tan patches relative to the crosshair center. If you overshot or lost geographic context, zoom="out" (zoom_ms=700..1100) and re-center rather than guessing blindly.
+  3) Read the visible coastlines, water bodies, terrain, and urban grey/tan patches relative to the crosshair center. On island chains, archipelagos, and narrow isthmuses (such as the Greater/Lesser Antilles, Polynesia, Mediterranean, or SE Asia), confirm neighboring islands or nearby mainland coastlines together in one regional frame first so you never mistake one island for a neighbor (e.g. Hispaniola or Cuba for Puerto Rico or Jamaica). If you overshot or lost geographic context, zoom="out" (zoom_ms=700..1100) and re-center rather than guessing blindly.
   4) Zoom closer in stages (zoom_ms=700..1100) so you can see the actual bay, river confluence, island, or urban footprint, then use fine=true (0.25x speed) for surgical nudges until the crosshair center sits dead-on the target.
   5) Call drop_pin({ confidence, monologue }) as soon as the crosshair center is locked on the target.
 
@@ -301,7 +301,7 @@ interface ChatToolCall {
     function: { name: string; arguments: string };
 }
 
-interface ChatMessage {
+export interface ChatMessage {
     role: 'system' | 'user' | 'assistant' | 'tool';
     content: string | Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> | null;
     reasoning_content?: string;
@@ -309,12 +309,15 @@ interface ChatMessage {
     tool_call_id?: string;
 }
 
-function stripOldImages(messages: ChatMessage[]): void {
+export function compactPriorTurns(messages: ChatMessage[]): void {
     for (const m of messages) {
         if (Array.isArray(m.content)) {
             m.content = m.content.map(part =>
                 part.type === 'image_url' ? { type: 'text', text: '[previous step screenshot omitted]' } : part
             );
+        }
+        if (m.role === 'assistant' && typeof m.reasoning_content === 'string') {
+            m.reasoning_content = '';
         }
     }
 }
@@ -1008,9 +1011,12 @@ async function pressSpaceToPlacePin(cdp: CDPClient): Promise<void> {
     await dispatchKey(cdp, 'keyup', 'Space');
 }
 
-async function captureScreenshotBase64(cdp: CDPClient): Promise<string> {
-    const res = await cdp.send<{ data: string }>('Page.captureScreenshot', { format: 'png' });
-    return res.data;
+async function captureScreenshotDataUrl(cdp: CDPClient): Promise<string> {
+    const res = await cdp.send<{ data: string }>('Page.captureScreenshot', {
+        format: 'jpeg',
+        quality: 90,
+    });
+    return `data:image/jpeg;base64,${res.data}`;
 }
 
 interface VisibleRoundHud {
@@ -1085,7 +1091,7 @@ function getMultiplierForRound(round: number): number {
 }
 
 interface CaptionSpec {
-    pngBase64: string;
+    imageDataUrl: string;
     topText: string;
     bottomTitle: string;
     bottomSub: string;
@@ -1094,7 +1100,7 @@ interface CaptionSpec {
 }
 
 /**
- * Uses Chromium's own Skia 2D canvas to scale each 900x900 PNG to 540x540 and
+ * Uses Chromium's own Skia 2D canvas to scale each 900x900 screenshot to 540x540 and
  * burn crisp top/bottom HUD caption bars, returning raw RGBA pixels.
  */
 async function rasterizeCaptionedFrameInChromium(
@@ -1102,7 +1108,7 @@ async function rasterizeCaptionedFrameInChromium(
     spec: CaptionSpec
 ): Promise<Uint8Array> {
     const payload = JSON.stringify({
-        pngBase64: spec.pngBase64,
+        imageDataUrl: spec.imageDataUrl,
         topText: spec.topText,
         bottomTitle: spec.bottomTitle,
         bottomSub: spec.bottomSub,
@@ -1184,8 +1190,8 @@ async function rasterizeCaptionedFrameInChromium(
                 }
                 resolve(btoa(binary));
             };
-            img.onerror = () => reject(new Error('Failed to decode screenshot PNG in canvas'));
-            img.src = 'data:image/png;base64,' + cfg.pngBase64;
+            img.onerror = () => reject(new Error('Failed to decode screenshot in canvas'));
+            img.src = cfg.imageDataUrl;
         }))(${payload})`,
     });
 
@@ -1430,8 +1436,8 @@ export async function runLlmDailyChallenge(
                 await ensureProtoCrosshair(cdp, true);
                 await sleep(120);
 
-                let latestPngB64 = await captureScreenshotBase64(cdp);
-                const initialPngB64 = latestPngB64;
+                let latestImageUrl = await captureScreenshotDataUrl(cdp);
+                const initialImageUrl = latestImageUrl;
 
                 const messages: ChatMessage[] = [
                     { role: 'system', content: SYSTEM_PROMPT },
@@ -1447,7 +1453,7 @@ export async function runLlmDailyChallenge(
                             },
                             {
                                 type: 'image_url',
-                                image_url: { url: `data:image/png;base64,${latestPngB64}` },
+                                image_url: { url: latestImageUrl },
                             },
                         ],
                     },
@@ -1457,7 +1463,7 @@ export async function runLlmDailyChallenge(
                     step: number;
                     applied: AppliedMove;
                     thought: string;
-                    pngB64: string;
+                    imageDataUrl: string;
                 }> = [];
 
                 let stepCount = 0;
@@ -1524,14 +1530,14 @@ export async function runLlmDailyChallenge(
                         abortController.signal
                     );
                     await ensureProtoCrosshair(cdp, true);
-                    latestPngB64 = await captureScreenshotBase64(cdp);
+                    latestImageUrl = await captureScreenshotDataUrl(cdp);
 
                     const thoughtShort = String(parsedArgs.thought_short || '').trim();
                     navCaptures.push({
                         step,
                         applied,
                         thought: thoughtShort,
-                        pngB64: latestPngB64,
+                        imageDataUrl: latestImageUrl,
                     });
 
                     if (step === MAX_STEPS_PER_ROUND) {
@@ -1545,7 +1551,7 @@ export async function runLlmDailyChallenge(
                         break;
                     }
 
-                    stripOldImages(messages);
+                    compactPriorTurns(messages);
                     messages.push({
                         role: 'tool',
                         tool_call_id: primaryCall.id,
@@ -1582,7 +1588,7 @@ export async function runLlmDailyChallenge(
                             },
                             {
                                 type: 'image_url',
-                                image_url: { url: `data:image/png;base64,${latestPngB64}` },
+                                image_url: { url: latestImageUrl },
                             },
                         ],
                     });
@@ -1625,7 +1631,7 @@ export async function runLlmDailyChallenge(
                 }
 
                 await sleep(2500);
-                let revealPngB64 = await captureScreenshotBase64(cdp);
+                let revealImageUrl = await captureScreenshotDataUrl(cdp);
                 let snarkyText = '';
                 let prevSnarky = '';
                 let snarkyStable = 0;
@@ -1655,7 +1661,7 @@ export async function runLlmDailyChallenge(
                         if (sc.text === prevSnarky) {
                             snarkyStable++;
                             if (snarkyStable >= 2 && sc.visible) {
-                                revealPngB64 = await captureScreenshotBase64(cdp);
+                                revealImageUrl = await captureScreenshotDataUrl(cdp);
                                 break;
                             }
                         } else {
@@ -1689,7 +1695,7 @@ export async function runLlmDailyChallenge(
 
                 // Queue GIF frames for this round (Step 0 + up to 4 representative nav steps + Reveal)
                 captionSpecs.push({
-                    pngBase64: initialPngB64,
+                    imageDataUrl: initialImageUrl,
                     topText: `${model} · R${round}/5 ${roundResult.cityName} (${multiplier}x) · Start`,
                     bottomTitle: `Clue: ${roundHud.instruction}`,
                     bottomSub: 'Inspecting satellite globe & center crosshair...',
@@ -1704,7 +1710,7 @@ export async function runLlmDailyChallenge(
                     if (nc.applied.zoomCode) keys.push(`${nc.applied.zoomCode}:${nc.applied.zoomMs}ms`);
                     if (nc.applied.fine) keys.push('Shift(0.25x)');
                     captionSpecs.push({
-                        pngBase64: nc.pngB64,
+                        imageDataUrl: nc.imageDataUrl,
                         topText: `${model} · R${round}/5 ${roundResult.cityName} · Step ${nc.step}`,
                         bottomTitle: `Keys: ${keys.join(' + ') || 'hold'}`,
                         bottomSub: nc.thought,
@@ -1716,7 +1722,7 @@ export async function runLlmDailyChallenge(
                 const revealAccent =
                     rawScore >= 75 ? '#5aff82' : rawScore >= 40 ? '#ffcd46' : '#ff5f73';
                 captionSpecs.push({
-                    pngBase64: revealPngB64,
+                    imageDataUrl: revealImageUrl,
                     topText: `${model} · R${round}/5 ${roundResult.cityName} · REVEAL`,
                     bottomTitle: `Score: ${rawScore}/100 (${weightedPoints}/${100 * multiplier} pts, ${Math.round(distanceKm)} km) · Conf ${finalConfidence}%`,
                     bottomSub: `"${finalMonologue}"`,
@@ -1743,7 +1749,7 @@ export async function runLlmDailyChallenge(
             }
 
             await sleep(2500);
-            const endgamePngB64 = await captureScreenshotBase64(cdp);
+            const endgameImageUrl = await captureScreenshotDataUrl(cdp);
 
             const totalScore = roundDetails.reduce((sum, r) => sum + r.weightedPoints, 0);
             const rawScore = roundDetails.reduce((sum, r) => sum + r.rawScore, 0);
@@ -1751,7 +1757,7 @@ export async function runLlmDailyChallenge(
             const wallClockMs = Math.round(performance.now() - matchStart);
 
             captionSpecs.push({
-                pngBase64: endgamePngB64,
+                imageDataUrl: endgameImageUrl,
                 topText: `${model} (Blind Crosshair) · FINAL SCORE: ${totalScore}/1000`,
                 bottomTitle: `${puzzleTitle} (${gameDate}) · Raw ${rawScore}/500 · ${totalSteps} steps`,
                 bottomSub: '100% blind visual WASD/QE/Space navigation (zero coordinate access)',
