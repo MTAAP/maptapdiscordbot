@@ -102,24 +102,18 @@ export async function postDailySummary(client: Client): Promise<void> {
             roundBreakdown,
             llmRun,
             llmPlacement,
-            replayAttachmentName: attachmentName,
         });
 
         if (hasReplayGif && llmRun?.gif_path && attachmentName) {
             try {
-                const file = new AttachmentBuilder(llmRun.gif_path, { name: attachmentName });
+                // Keep replay GIF as a standalone SPOILER_ attachment (not embed.setImage) so Discord blurs it until clicked
+                const file = new AttachmentBuilder(llmRun.gif_path, { name: attachmentName }).setSpoiler(true);
                 await channel.send({ embeds: [embed], files: [file] });
-                console.log('Daily summary posted with local-smart replay GIF');
+                console.log('Daily summary posted with spoilered local-smart replay GIF');
                 return;
             } catch (attachErr) {
                 console.warn('Replay GIF upload failed; posting daily summary without attachment:', attachErr);
-                const fallbackEmbed = createDailySummaryEmbed(yesterday, stats, records, {
-                    revealCities: true,
-                    roundBreakdown,
-                    llmRun,
-                    llmPlacement,
-                });
-                await channel.send({ embeds: [fallbackEmbed] });
+                await channel.send({ embeds: [embed] });
                 console.log('Daily summary posted (fallback without GIF)');
                 return;
             }

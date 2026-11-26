@@ -113,6 +113,10 @@ export function formatSignedDelta(delta: number): string {
     return `${sign}${formatAverage(delta)}`;
 }
 
+export function formatDiscordSpoiler(text: string): string {
+    return `||${text.replace(/\|\|/g, '\\|\\|')}||`;
+}
+
 function pickBestLlmMonologue(details: LlmRoundDetail[]): LlmRoundDetail | null {
     if (details.length === 0) return null;
     const withMono = details.filter(d => d.monologue && d.monologue.trim().length > 0);
@@ -187,7 +191,6 @@ export function createDailySummaryEmbed(
         roundBreakdown?: ChallengeRoundBreakdown[];
         llmRun?: LlmDailyRunRecord | null;
         llmPlacement?: LlmDayLobbyPlacement | null;
-        replayAttachmentName?: string;
     } = {}
 ): EmbedBuilder {
     const embed = new EmbedBuilder()
@@ -221,7 +224,7 @@ export function createDailySummaryEmbed(
         value: `• Players: **${stats.totalGames}**\n• Daily Average: **${formatAverage(stats.average)}** pts`,
     });
 
-    // Optional post-midnight location reveal (suppressed during live day to avoid spoilers)
+    // Post-midnight locations hidden behind click-to-reveal Discord spoilers
     if (options.revealCities && options.roundBreakdown && options.roundBreakdown.length > 0) {
         const weights = [1, 1, 2, 3, 3];
         const roundLines = options.roundBreakdown.map(r => {
@@ -230,7 +233,8 @@ export function createDailySummaryEmbed(
                 r.lobbyMean !== null && r.bestScore !== null
                     ? ` — μ **${formatAverage(r.lobbyMean)}** · Top: **${r.bestScore}** (${r.bestPlayers.join(', ')})`
                     : '';
-            return `**R${r.roundNum}** (${w}×) ${r.flag} **${r.name}**${statsPart}`;
+            const hiddenLocation = formatDiscordSpoiler(`${r.flag} **${r.name}**`);
+            return `**R${r.roundNum}** (${w}×) ${hiddenLocation}${statsPart}`;
         });
         const chunks = chunkEntriesForFields(roundLines, {
             separator: '\n',
@@ -294,24 +298,35 @@ export function createDailySummaryEmbed(
                           .map(d => `R${d.round}: **${d.rawScore}** (${Math.round(d.distanceKm)} km)`)
                           .join(' · ')
                     : '';
-            const highlight = pickBestLlmMonologue(details);
-            const monoLine = highlight
-                ? `\n> *"${highlight.monologue.slice(0, 260)}"* (R${highlight.round} ${highlight.cityName})`
-                : '';
-
-            const showdownText =
+            const baseShowdown =
                 `**${formatNumber(completedLlm.total_score!)}** pts via \`${completedLlm.model}\` — ${rankStr}` +
-                (roundsLine ? `\n${roundsLine}` : '') +
-                monoLine;
+                (roundsLine ? `\n${roundsLine}` : '');
+            const highlight = pickBestLlmMonologue(details);
+            let showdownText = baseShowdown;
+            if (highlight) {
+                const cleanCity = highlight.cityName
+                    .replace(/\s+/g, ' ')
+                    .replace(/\|\|/g, '\\|\\|')
+                    .trim();
+                const cleanMono = highlight.monologue
+                    .replace(/\s+/g, ' ')
+                    .replace(/\|\|/g, '\\|\\|')
+                    .trim();
+                const prefix = '\n> ||*"';
+                const suffix = `"* (R${highlight.round} ${cleanCity})||`;
+                const budget = Math.min(
+                    260,
+                    DISCORD_EMBED_FIELD_LIMIT - baseShowdown.length - prefix.length - suffix.length
+                );
+                if (budget > 20) {
+                    showdownText = `${baseShowdown}${prefix}${cleanMono.slice(0, budget)}${suffix}`;
+                }
+            }
 
             embed.addFields({
                 name: '🤖 local-smart Showdown',
                 value: showdownText.slice(0, DISCORD_EMBED_FIELD_LIMIT),
             });
-
-            if (options.replayAttachmentName) {
-                embed.setImage(`attachment://${options.replayAttachmentName}`);
-            }
         }
     }
 

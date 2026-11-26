@@ -755,9 +755,23 @@ test('Phase 1: regional standings, passport, and daily summary spoiler gate work
             roundBreakdown: breakdown,
         })
         .toJSON();
+    const locationsField = (midnightEmbed.fields ?? []).find(f => f.name === '🌍 Locations Played');
+    assert.ok(locationsField, 'Midnight summary must include Locations Played field');
     assert.ok(
-        JSON.stringify(midnightEmbed).includes('Leipzig, Germany'),
-        'Midnight summary must reveal locations'
+        locationsField.value.includes('||🇩🇪 **Leipzig, Germany**||'),
+        'Midnight summary must hide flag and location name inside click-to-reveal Discord spoilers'
+    );
+    for (const line of locationsField.value.split('\n')) {
+        assert.match(
+            line,
+            /^\*\*R\d\*\* \(\d×\) \|\|.+ \*\*.+\*\*\|\|/,
+            `Each location line must wrap flag and name in ||...|| spoilers: ${line}`
+        );
+    }
+    assert.equal(
+        embeds.formatDiscordSpoiler('City || Name'),
+        '||City \\|\\| Name||',
+        'Spoiler helper must escape embedded || delimiters'
     );
 });
 
@@ -884,19 +898,105 @@ test('Phase 2: llm_daily_runs keeps human scores pure, computes W-L rivalry, and
     assert.ok(!liveDailyJson.includes('Taranto'));
     assert.ok(!liveDailyJson.includes('Salento instep'));
 
-    // Midnight summary embed reveals monologue + attaches replay image
-    const midnightJson = JSON.stringify(
-        embeds
-            .createDailySummaryEmbed('2026-11-10', humanDayStats, [], {
-                revealCities: true,
-                llmRun: run,
-                llmPlacement: placement,
-                replayAttachmentName: 'maptap-local-smart-2026-11-10.gif',
-            })
-            .toJSON()
+    // Midnight summary embed hides highlighted monologue + city behind Discord spoilers and does not embed unspoilered GIF image
+    const midnightEmbed = embeds
+        .createDailySummaryEmbed('2026-11-10', humanDayStats, [], {
+            revealCities: true,
+            llmRun: run,
+            llmPlacement: placement,
+        })
+        .toJSON();
+    const showdownField = (midnightEmbed.fields ?? []).find(f => f.name === '🤖 local-smart Showdown');
+    assert.ok(showdownField, 'Midnight summary must include local-smart Showdown field');
+    assert.ok(
+        showdownField.value.includes(
+            '> ||*"Dead on the Salento instep notch at Taranto!"* (R4 Taranto, Italy)||'
+        ),
+        'Showdown monologue and city must be wrapped in Discord spoiler tags'
     );
-    assert.ok(midnightJson.includes('Salento instep'));
-    assert.ok(midnightJson.includes('attachment://maptap-local-smart-2026-11-10.gif'));
+    assert.equal(
+        midnightEmbed.image,
+        undefined,
+        'Daily summary embed must not set embed.image (which bypasses Discord SPOILER_ attachment blur)'
+    );
+
+    // postDailySummary attaches the replay GIF as a standalone SPOILER_ file alongside the embed
+    const yesterdayIso = schedulerMod.getYesterdayDate('Europe/Amsterdam');
+    const yesterdayGifPath = path.join(tmpDir, `${yesterdayIso}.gif`);
+    fs.writeFileSync(yesterdayGifPath, Buffer.from('GIF89a-yesterday'));
+    queries.upsertDailyChallengeRounds([
+        {
+            gameDate: yesterdayIso,
+            roundNum: 1,
+            locationId: `${yesterdayIso}-1`,
+            name: 'Granada, Spain',
+            lat: 37.1773,
+            lng: -3.5986,
+            countryCode: 'ES',
+            countryName: 'Spain',
+            continent: 'Europe',
+            subregion: 'Southern Europe',
+            title: null,
+        },
+    ]);
+    queries.insertScore('u_grissom', '.grissom', 923, [99, 98, 97, 86, 100], yesterdayIso, 'm_y_1');
+    queries.upsertLlmDailyRunStart(yesterdayIso, 'local-smart', 'visual-crosshair');
+    queries.completeLlmDailyRun({
+        gameDate: yesterdayIso,
+        model: 'local-smart',
+        mode: 'visual-crosshair',
+        totalScore: 922,
+        rawScore: 466,
+        roundScores: [99, 99, 80, 95, 93],
+        roundDetails: [
+            {
+                round: 1,
+                multiplier: 1,
+                cityName: 'Granada, Spain',
+                rawScore: 99,
+                weightedPoints: 99,
+                distanceKm: 69,
+                stepCount: 8,
+                forcedDrop: false,
+                confidence: 88,
+                monologue: 'Sierra Nevada foothills in southern Andalusia!',
+                snarkyText: 'Nice!',
+            },
+        ],
+        totalSteps: 40,
+        wallClockMs: 120_000,
+        promptTokens: 20_000,
+        completionTokens: 4_000,
+        reasoningTokens: 1_000,
+        gifPath: yesterdayGifPath,
+    });
+
+    let postedDailyPayload = null;
+    const summaryChannel = Object.create(TextChannel.prototype);
+    summaryChannel.send = async payload => {
+        postedDailyPayload = payload;
+    };
+    await schedulerMod.postDailySummary({
+        channels: { fetch: async () => summaryChannel },
+    });
+    assert.ok(postedDailyPayload, 'postDailySummary must send a message');
+    assert.equal(postedDailyPayload.files?.length, 1, 'postDailySummary must attach the replay GIF');
+    assert.equal(
+        postedDailyPayload.files[0].name,
+        `SPOILER_maptap-local-smart-${yesterdayIso}.gif`,
+        'Replay GIF attachment must use SPOILER_ prefix so Discord blurs it until clicked'
+    );
+    assert.equal(postedDailyPayload.files[0].spoiler, true);
+    const postedJson = postedDailyPayload.embeds[0].toJSON();
+    assert.equal(postedJson.image, undefined);
+    const postedLocations = (postedJson.fields ?? []).find(f => f.name === '🌍 Locations Played');
+    assert.ok(postedLocations?.value.includes('||🇪🇸 **Granada, Spain**||'));
+    const postedShowdown = (postedJson.fields ?? []).find(f => f.name === '🤖 local-smart Showdown');
+    assert.ok(
+        postedShowdown?.value.includes(
+            '> ||*"Sierra Nevada foothills in southern Andalusia!"* (R1 Granada, Spain)||'
+        )
+    );
 
     // /maptap llm (default and date:<today>) shows Round 1..5 scores without leaking cities, monologues, or GIF
     const todayIso = queries.getTodayDate('Europe/Amsterdam');
