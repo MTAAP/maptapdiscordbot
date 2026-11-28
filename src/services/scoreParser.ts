@@ -33,8 +33,11 @@ export function parseMapTapMessage(content: string): ParsedMapTapScore | null {
 
     // Extract date from first line:
     // "www.maptap.gg November 11", "https://maptap.gg November 11",
+    // "<https://maptap.gg> November 11" (MapTap Discord-friendly share),
     // "https://www.maptap.gg November 11", or "MapTap November 11"
-    const dateMatch = lines[0].match(/^(?:(?:https?:\/\/)?(?:www\.)?maptap\.gg|MapTap)\s+(.+)$/);
+    const dateMatch = lines[0]
+        .trim()
+        .match(/^(?:<(?:https?:\/\/)?(?:www\.)?maptap\.gg\/?>|(?:https?:\/\/)?(?:www\.)?maptap\.gg\/?|MapTap)\s+(.+)$/);
     if (!dateMatch) {
         return null;
     }
