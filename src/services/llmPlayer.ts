@@ -1028,6 +1028,74 @@ interface VisibleRoundHud {
     gameDateKey: string;
 }
 
+export function buildRoundHudReaderExpression(targetRound: number): string {
+    return `(() => {
+        const openedElapsedOk = typeof runtime !== 'undefined'
+            && (typeof runtime.roundOpenedAt !== 'number' || (performance.now() - runtime.roundOpenedAt) >= 1750);
+        const ready = typeof gameState !== 'undefined'
+            && typeof runtime !== 'undefined'
+            && runtime.currentlyScoring === 0
+            && !!runtime.activeRoundCity
+            && openedElapsedOk
+            && gameState.round === ${targetRound};
+        const readText = (el) => {
+            if (!el) return '';
+            const visible = typeof el.innerText === 'string' ? el.innerText.trim() : '';
+            if (visible) return visible;
+            return typeof el.textContent === 'string' ? el.textContent.trim() : '';
+        };
+        const ui2Hud = document.getElementById('ui2-hud');
+        const ui2Active = Boolean(
+            ui2Hud && !ui2Hud.hidden && document.documentElement?.classList?.contains('ui2-hud')
+        );
+        const ui2Prompt = ui2Active ? readText(ui2Hud.querySelector('.ui2-prompt')) : '';
+        const ui2Count = ui2Active ? readText(ui2Hud.querySelector('.ui2-progress-count')) : '';
+        const ui2Eyebrow = ui2Active ? readText(ui2Hud.querySelector('.ui2-eyebrow')) : '';
+        const ui2Header = [ui2Count, ui2Eyebrow].filter(Boolean).join(' · ');
+        const instruction = (
+            ui2Prompt
+            || readText(document.getElementById('instruction'))
+            || readText(document.getElementById('info'))
+        ).trim();
+        const header = (
+            ui2Header
+            || readText(document.getElementById('info_header'))
+            || readText(document.getElementById('round-meta'))
+        ).trim();
+        const puzzleTitle = (
+            readText(document.getElementById('bar_center_text'))
+            || readText(document.getElementById('bar_center_link'))
+        ).trim();
+        const gameDateKey = typeof GAME_DATE_KEY === 'string' ? GAME_DATE_KEY : '';
+        return { ready, round: typeof gameState !== 'undefined' ? gameState.round : null, instruction, header, puzzleTitle, gameDateKey };
+    })()`;
+}
+
+export function buildRevealCardReaderExpression(): string {
+    return `(() => {
+        const ui2Cards = document.querySelectorAll('.ui2-readout');
+        if (ui2Cards.length > 0) {
+            const card = ui2Cards[ui2Cards.length - 1];
+            const lines = Array.from(card.querySelectorAll('.ui2-readout-joke'))
+                .filter(el => !el.hidden && el.style?.display !== 'none' && el.style?.opacity !== '0')
+                .map(el => (el.innerText || el.textContent || '').trim())
+                .filter(Boolean);
+            const fading = card.style?.opacity === '0';
+            return { visible: !fading, text: lines.join(' ') };
+        }
+        const cards = document.querySelectorAll('.score-display');
+        const card = cards[cards.length - 1];
+        if (!card) return { visible: false, text: '' };
+        const lines = Array.from(card.querySelectorAll('.snarky-text'))
+            .filter(el => el.style?.display !== 'none' && el.style?.opacity !== '0')
+            .map(el => (el.innerText || el.textContent || '').trim())
+            .filter(Boolean);
+        const cityEl = card.querySelector('.city-name');
+        const fading = Boolean(cityEl && cityEl.style?.opacity === '0');
+        return { visible: !fading, text: lines.join(' ') };
+    })()`;
+}
+
 /**
  * Blind-hands boundary: reads ONLY round readiness, elapsed open time, and visible HUD strings.
  * MapTap runs a 1500ms intro camera tween on Round 1 and a 1500ms previous-round overlay clear
@@ -1045,21 +1113,7 @@ async function waitForRoundReady(
     for (let i = 0; i < 120; i++) {
         await abortableSleep(250, abortSignal);
         const evalRes = await cdp.send<{ result: { value?: VisibleRoundHud } }>('Runtime.evaluate', {
-            expression: `(() => {
-                const openedElapsedOk = typeof runtime !== 'undefined'
-                    && (typeof runtime.roundOpenedAt !== 'number' || (performance.now() - runtime.roundOpenedAt) >= 1750);
-                const ready = typeof gameState !== 'undefined'
-                    && typeof runtime !== 'undefined'
-                    && runtime.currentlyScoring === 0
-                    && !!runtime.activeRoundCity
-                    && openedElapsedOk
-                    && gameState.round === ${targetRound};
-                const instruction = (document.getElementById('instruction')?.innerText || document.getElementById('info')?.innerText || '').trim();
-                const header = (document.getElementById('info_header')?.innerText || document.getElementById('round-meta')?.innerText || '').trim();
-                const puzzleTitle = (document.getElementById('bar_center_text')?.innerText || '').trim();
-                const gameDateKey = typeof GAME_DATE_KEY === 'string' ? GAME_DATE_KEY : '';
-                return { ready, round: typeof gameState !== 'undefined' ? gameState.round : null, instruction, header, puzzleTitle, gameDateKey };
-            })()`,
+            expression: buildRoundHudReaderExpression(targetRound),
             returnByValue: true,
         });
         const st = evalRes.result.value;
@@ -1641,18 +1695,7 @@ export async function runLlmDailyChallenge(
                     const snarkRes = await cdp.send<{
                         result: { value?: { visible: boolean; text: string } };
                     }>('Runtime.evaluate', {
-                        expression: `(() => {
-                            const cards = document.querySelectorAll('.score-display');
-                            const card = cards[cards.length - 1];
-                            if (!card) return { visible: false, text: '' };
-                            const lines = Array.from(card.querySelectorAll('.snarky-text'))
-                                .filter(el => el.style.display !== 'none' && el.style.opacity !== '0')
-                                .map(el => (el.innerText || '').trim())
-                                .filter(Boolean);
-                            const cityEl = card.querySelector('.city-name');
-                            const fading = cityEl && cityEl.style.opacity === '0';
-                            return { visible: !fading, text: lines.join(' ') };
-                        })()`,
+                        expression: buildRevealCardReaderExpression(),
                         returnByValue: true,
                     });
                     const sc = snarkRes.result.value;

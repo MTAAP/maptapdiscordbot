@@ -4,7 +4,7 @@ A Discord bot that tracks MapTap geography game scores, posts daily and weekly s
 
 ## Features
 
-- **Automatic Score Detection**: Monitors a channel for MapTap score messages (`www.maptap.gg`, `https://maptap.gg`, or `MapTap <Month> <Day>`, including flag-prefixed round scores)
+- **Automatic Score Detection**: Monitors a channel for MapTap score messages (`www.maptap.gg`, `https://maptap.gg`, `<https://maptap.gg>`, or `MapTap <Month> <Day>`, including flag-prefixed round scores)
 - **Daily and Weekly Summaries**: Automated daily recap at `SUMMARY_HOUR:00` and Monday weekly recap at `SUMMARY_HOUR:05` in `TIMEZONE`
 - **Regional Standings and Passports**: Syncs daily challenge locations from `maptap.gg` and ranks players by UN M49 continent, subregion, and country
 - **Daily `local-smart` Challenger**: Optional headless Chromium player that navigates `maptap.gg/?letmeplay=1` using only screenshots and keyboard controls (`WASD`, `QE`, `Shift`, `Space`), shows a spoiler-free daytime benchmark, and attaches an animated replay GIF to the `SUMMARY_HOUR:00` recap on days with recorded games (or on demand via `/maptap llm`)

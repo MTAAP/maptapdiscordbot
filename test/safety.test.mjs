@@ -465,7 +465,7 @@ test('F14: importChannelHistory enforces single-flight lock, uses cache:false, a
     assert.equal(queries.getRecordsForDate('2026-11-11').length, 0);
 });
 
-test('Phase 1: parseMapTapMessage supports https/linkless headers and flag-prefix round scores', () => {
+test('Phase 1: parseMapTapMessage supports https/Discord-bracketed/linkless headers, flag-prefix scores, and rejects custom maps', () => {
     const discordShare = scoreParser.parseMapTapMessage(
         'https://maptap.gg November 11\n🇵🇱99 🇯🇵95 🇺🇸96 🇮🇹91 🌐17\nFinal score: 710\n🔥 12 day streak'
     );
@@ -473,6 +473,15 @@ test('Phase 1: parseMapTapMessage supports https/linkless headers and flag-prefi
         gameDate: 'November 11',
         roundScores: [99, 95, 96, 91, 17],
         finalScore: 710,
+    });
+
+    const angleBracketDiscordShare = scoreParser.parseMapTapMessage(
+        '<https://maptap.gg> November 28\n🇮🇳95 🇨🇺99 🇮🇪99 🇦🇫87 🇵🇪94\nFinal score: 935\n🔥 20 day streak'
+    );
+    assert.deepEqual(angleBracketDiscordShare, {
+        gameDate: 'November 28',
+        roundScores: [95, 99, 99, 87, 94],
+        finalScore: 935,
     });
 
     const linklessShare = scoreParser.parseMapTapMessage(
@@ -483,6 +492,21 @@ test('Phase 1: parseMapTapMessage supports https/linkless headers and flag-prefi
         roundScores: [99, 95, 96, 91, 17],
         finalScore: 710,
     });
+
+    assert.equal(
+        scoreParser.parseMapTapMessage(
+            'Ida Pfeiffer\n99🏆 95⭐ 96🔥 91👏 80👏\nFinal score: 890\nhttps://maptap.gg/?bestof=ida'
+        ),
+        null,
+        'Best-Of custom map shares must not be parsed as daily scores'
+    );
+    assert.equal(
+        scoreParser.parseMapTapMessage(
+            'Capitals Tour by Alice\n99🏆 95⭐ 96🔥 91👏 80👏\nFinal score: 890\nhttps://maptap.gg/@alice/capitals'
+        ),
+        null,
+        'Player-map shares must not be parsed as daily scores'
+    );
 });
 
 test('Phase 1: classifyLocation resolves border straits, islands, bare cities, Georgia disambiguation, and ocean', () => {
@@ -574,6 +598,23 @@ test('Phase 1: classifyLocation resolves border straits, islands, bare cities, G
     assert.equal(
         geographyMod.classifyLocation({ name: 'Cockburn Town, Turks and Caicos', lat: 21.4612, lng: -71.1419 }).countryCode,
         'TC'
+    );
+    // Coordinate-only resolution for island nations added in MapTap countries.geojson v15
+    assert.equal(
+        geographyMod.classifyLocation({ name: 'Malé', lat: 4.1755, lng: 73.5093 }).countryCode,
+        'MV'
+    );
+    assert.equal(
+        geographyMod.classifyLocation({ name: 'Funafuti', lat: -8.5211, lng: 179.1962 }).countryCode,
+        'TV'
+    );
+    assert.equal(
+        geographyMod.classifyLocation({ name: 'Yaren', lat: -0.5477, lng: 166.9209 }).countryCode,
+        'NR'
+    );
+    assert.equal(
+        geographyMod.classifyLocation({ name: 'Victoria', lat: -4.6191, lng: 55.4513 }).countryCode,
+        'SC'
     );
 
     dbMod.db.exec('DELETE FROM daily_challenges;');
@@ -1385,6 +1426,125 @@ test('Phase 2: executeNavigateGlobe accumulates full effective rAF dt under 3.3 
     assert.doesNotMatch(ciYaml, /actions\/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5/);
     assert.doesNotMatch(ciYaml, /actions\/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020/);
     assert.doesNotMatch(deployYaml, /actions\/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5/);
+});
+
+test('Phase 2: LLM HUD and reveal readers work across classic UI and ui2 (display:none overlay)', () => {
+    const hudExpr = llmPlayerMod.buildRoundHudReaderExpression(2);
+    const revealExpr = llmPlayerMod.buildRevealCardReaderExpression();
+
+    // 1. ui2 active: #overlay is display:none (innerText === ""), #ui2-hud holds visible prompt + progress
+    const ui2Sandbox = {
+        performance: { now: () => 5000 },
+        GAME_DATE_KEY: 'November28',
+        gameState: { round: 2 },
+        runtime: { currentlyScoring: 0, activeRoundCity: { name: 'Havana, Cuba' }, roundOpenedAt: 1000 },
+        document: {
+            documentElement: { classList: { contains: cls => cls === 'ui2-hud' || cls === 'ui2' } },
+            getElementById(id) {
+                if (id === 'ui2-hud') {
+                    return {
+                        hidden: false,
+                        querySelector(sel) {
+                            if (sel === '.ui2-prompt') return { innerText: 'Find Havana, Cuba', textContent: 'Find Havana, Cuba' };
+                            if (sel === '.ui2-progress-count') return { innerText: '2/5', textContent: '2/5' };
+                            if (sel === '.ui2-eyebrow') return { innerText: 'EASY', textContent: 'EASY' };
+                            return null;
+                        },
+                    };
+                }
+                if (id === 'instruction') return { innerText: '', textContent: 'Find Havana, Cuba' };
+                if (id === 'info_header') return { innerText: '', textContent: 'Round 2 of 5' };
+                if (id === 'bar_center_text') return { innerText: '', textContent: 'The Tiblets' };
+                return null;
+            },
+            querySelectorAll(sel) {
+                if (sel === '.ui2-readout') {
+                    return [
+                        {
+                            style: { opacity: '1' },
+                            querySelectorAll(childSel) {
+                                if (childSel !== '.ui2-readout-joke') return [];
+                                return [
+                                    { hidden: false, style: {}, innerText: 'Bullseye in Cuba!', textContent: 'Bullseye in Cuba!' },
+                                    { hidden: true, style: {}, innerText: 'Hidden fact', textContent: 'Hidden fact' },
+                                ];
+                            },
+                        },
+                    ];
+                }
+                return [];
+            },
+        },
+    };
+    const ui2Hud = vm.runInNewContext(hudExpr, ui2Sandbox);
+    assert.equal(ui2Hud.ready, true);
+    assert.equal(ui2Hud.instruction, 'Find Havana, Cuba');
+    assert.equal(ui2Hud.header, '2/5 · EASY');
+    assert.equal(ui2Hud.puzzleTitle, 'The Tiblets');
+    const ui2Reveal = vm.runInNewContext(revealExpr, ui2Sandbox);
+    assert.equal(ui2Reveal.visible, true);
+    assert.equal(ui2Reveal.text, 'Bullseye in Cuba!');
+
+    // 2. Hidden #overlay fallback: ui2-hud not mounted yet while #instruction is display:none (innerText === "")
+    const hiddenOverlaySandbox = {
+        performance: { now: () => 5000 },
+        GAME_DATE_KEY: 'November28',
+        gameState: { round: 2 },
+        runtime: { currentlyScoring: 0, activeRoundCity: { name: 'Havana, Cuba' }, roundOpenedAt: 1000 },
+        document: {
+            documentElement: { classList: { contains: cls => cls === 'ui2' } },
+            getElementById(id) {
+                if (id === 'instruction') return { innerText: '', textContent: 'Find Havana, Cuba' };
+                if (id === 'info_header') return { innerText: '', textContent: 'Round 2 of 5' };
+                return null;
+            },
+            querySelectorAll: () => [],
+        },
+    };
+    const hiddenHud = vm.runInNewContext(hudExpr, hiddenOverlaySandbox);
+    assert.equal(hiddenHud.ready, true);
+    assert.equal(hiddenHud.instruction, 'Find Havana, Cuba');
+    assert.equal(hiddenHud.header, 'Round 2 of 5');
+
+    // 3. Classic UI active: #overlay visible and .score-display used for reveal
+    const classicSandbox = {
+        performance: { now: () => 5000 },
+        GAME_DATE_KEY: 'November28',
+        gameState: { round: 2 },
+        runtime: { currentlyScoring: 0, activeRoundCity: { name: 'Havana, Cuba' }, roundOpenedAt: 1000 },
+        document: {
+            documentElement: { classList: { contains: () => false } },
+            getElementById(id) {
+                if (id === 'instruction') return { innerText: 'Find Havana, Cuba', textContent: 'Find Havana, Cuba' };
+                if (id === 'info_header') return { innerText: 'Round 2 of 5', textContent: 'Round 2 of 5' };
+                if (id === 'bar_center_text') return { innerText: 'The Tiblets', textContent: 'The Tiblets' };
+                return null;
+            },
+            querySelectorAll(sel) {
+                if (sel === '.score-display') {
+                    return [
+                        {
+                            querySelectorAll(childSel) {
+                                if (childSel !== '.snarky-text') return [];
+                                return [{ style: { display: 'block', opacity: '1' }, innerText: 'So close!' }];
+                            },
+                            querySelector(childSel) {
+                                return childSel === '.city-name' ? { style: { opacity: '1' } } : null;
+                            },
+                        },
+                    ];
+                }
+                return [];
+            },
+        },
+    };
+    const classicHud = vm.runInNewContext(hudExpr, classicSandbox);
+    assert.equal(classicHud.ready, true);
+    assert.equal(classicHud.instruction, 'Find Havana, Cuba');
+    assert.equal(classicHud.header, 'Round 2 of 5');
+    const classicReveal = vm.runInNewContext(revealExpr, classicSandbox);
+    assert.equal(classicReveal.visible, true);
+    assert.equal(classicReveal.text, 'So close!');
 });
 
 test.after(() => {
